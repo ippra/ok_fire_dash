@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>
+// Some static handlers serve /fire without adding the trailing slash, which
+// breaks every relative URL in this page. Canonicalize first.
+(function(){var p=location.pathname;
+if(!/\/$/.test(p)&&!/\.html$/.test(p)){location.replace(p+"/"+location.search+location.hash);}})();
+</script>
+<title>Oklahoma Fire Detections — NOAA Hazard Mapping System</title>
+<meta name="description" content="Satellite fire detections across Oklahoma since 2015, from NOAA's Hazard Mapping System, updated every few hours.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%23e07227'/%3E%3Ccircle cx='16' cy='16' r='6' fill='%23ffd8c3'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="./assets/vendor/maplibre-gl-6.10.0/maplibre-gl.css">
+<link rel="stylesheet" href="./engine.css?v=__BUILD__">
+<script>
+window.OKF_BUILD = "__BUILD__";
+// Watchdog: if the app never leaves the loading screen, say what failed rather
+// than leaving a blank map.
+window.__okfFailed = [];
+window.addEventListener("error", function (e) {
+  var t = e && e.target;
+  if (t && (t.src || t.href)) { window.__okfFailed.push(t.src || t.href); }
+  else { window.__okfErr = (e && e.message) || String(e); }
+}, true);
+window.addEventListener("unhandledrejection", function (e) {
+  window.__okfErr = "async: " + ((e.reason && e.reason.message) || e.reason);
+});
+window.addEventListener("load", function () { setTimeout(function () {
+  var l = document.getElementById("boot");
+  if (!l || l.hidden) return;
+  var d = ["engine.js executed: " + (window.OKF_ENGINE_LOADED ? "yes" : "NO")];
+  if (window.__okfFailed.length) d.push("failed to load: " + window.__okfFailed.join(", "));
+  if (window.__okfErr) d.push("error: " + window.__okfErr);
+  l.textContent = "The map failed to start.\n\nDiagnostics (please send these to the maintainers):\n" +
+    d.join("\n") + "\nbuild " + window.OKF_BUILD + " — " + navigator.userAgent;
+  l.classList.add("boot-failed");
+}, 8000); });
+</script>
+</head>
+<body>
+<!-- The IPPRA institutional bar, shared with every IPPRA dashboard. Static
+     markup so it paints with the page; see fusion_dash/site/index.html for why
+     it has two modes. -->
+<div id="ippra-bar">
+  <a class="ippra-bar-home" href="https://ippra.net">IPPRA &middot; University of Oklahoma</a>
+  <a class="ippra-bar-back" href="https://ippra.net"><span aria-hidden="true">&larr;</span> Back to IPPRA</a>
+</div>
+<script>
+(function () {
+  var root = document.documentElement;
+  // Only ever return to a path on this origin: an absolute destination would
+  // make this an open redirect.
+  function safePath(p) {
+    return (typeof p === "string" && p.charAt(0) === "/" &&
+            p.charAt(1) !== "/" && p.charAt(1) !== "\\") ? p : null;
+  }
+  var back = null;
+  try {
+    back = safePath(new URLSearchParams(location.search).get("from"));
+    if (!back && document.referrer) {
+      var r = new URL(document.referrer);
+      if (r.origin === location.origin &&
+          r.pathname.replace(/\/+$/, "") !== location.pathname.replace(/\/+$/, "")) {
+        back = r.pathname + r.search;
+      }
+    }
+  } catch (e) { /* malformed referrer: keep the institutional link */ }
+
+  if (back) {
+    root.setAttribute("data-entry", "referred");
+    var backLink = document.querySelector(".ippra-bar-back");
+    backLink.setAttribute("href", back);
+    // Links from ippra.net open a new tab, so "back" means closing it. close()
+    // is refused silently once the tab has history, hence the fallback timer.
+    backLink.addEventListener("click", function (ev) {
+      if (ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+      ev.preventDefault();
+      var href = backLink.getAttribute("href");
+      window.close();
+      setTimeout(function () { location.href = href; }, 150);
+    });
+    if (window.history && history.replaceState && /[?&]from=/.test(location.search)) {
+      var q = new URLSearchParams(location.search);
+      q.delete("from");
+      var qs = q.toString();
+      history.replaceState(null, "", location.pathname + (qs ? "?" + qs : "") + location.hash);
+    }
+  }
+})();
+</script>
+
+<div id="shell">
+  <aside id="panel" aria-label="Controls and summary">
+    <header class="panel-head">
+      <h1>Oklahoma Fire Detections</h1>
+      <p class="lede">Satellite fire detections from NOAA&rsquo;s Hazard Mapping System</p>
+      <p class="freshness" id="freshness"><span class="live-dot" aria-hidden="true"></span><span id="freshness-text">Loading&hellip;</span></p>
+    </header>
+
+    <section class="block" aria-labelledby="h-dates">
+      <h2 id="h-dates">Dates</h2>
+      <div class="presets" id="presets" role="group" aria-label="Date presets"></div>
+      <div class="date-row">
+        <label>From <input type="date" id="date-start"></label>
+        <label>To <input type="date" id="date-end"></label>
+      </div>
+      <div class="step-row">
+        <button type="button" class="btn icon" id="step-back" title="Earlier period (←)" aria-label="Earlier period">&#9664;</button>
+        <span class="range-label" id="range-label" aria-live="polite"></span>
+        <button type="button" class="btn icon" id="step-fwd" title="Later period (→)" aria-label="Later period">&#9654;</button>
+      </div>
+      <div class="play-row">
+        <button type="button" class="btn" id="play" aria-pressed="false"><span class="play-glyph" aria-hidden="true">&#9654;</span> <span class="play-text">Play day by day</span></button>
+        <label class="inline">Speed
+          <select id="play-speed">
+            <option value="900">Slow</option>
+            <option value="450" selected>Normal</option>
+            <option value="150">Fast</option>
+          </select>
+        </label>
+      </div>
+    </section>
+
+    <section class="block" aria-labelledby="h-summary">
+      <h2 id="h-summary">In this period</h2>
+      <div class="tiles" id="tiles"></div>
+      <p class="note" id="summary-note"></p>
+    </section>
+
+    <section class="block" aria-labelledby="h-map">
+      <h2 id="h-map">Map</h2>
+      <div class="seg" role="radiogroup" aria-label="Map view" id="view-seg">
+        <button type="button" role="radio" data-view="points">Detections</button>
+        <button type="button" role="radio" data-view="heat">Heat map</button>
+        <button type="button" role="radio" data-view="counties">Counties</button>
+      </div>
+      <div class="seg small" role="radiogroup" aria-label="Color detections by" id="color-seg">
+        <button type="button" role="radio" data-color="frp">Color by intensity</button>
+        <button type="button" role="radio" data-color="sensor">Color by sensor</button>
+      </div>
+      <label class="field">Minimum intensity
+        <select id="min-frp">
+          <option value="0">All detections</option>
+          <option value="1">Measured intensity only</option>
+          <option value="10">10 MW or more</option>
+          <option value="50">50 MW or more</option>
+          <option value="100">100 MW or more</option>
+        </select>
+      </label>
+      <div class="legend" id="legend" aria-live="polite"></div>
+    </section>
+
+    <section class="block" aria-labelledby="h-sensors">
+      <h2 id="h-sensors">Sensors</h2>
+      <div id="families" class="families"></div>
+      <p class="note">Each count follows the dates and minimum intensity, whether or not that sensor is switched on.</p>
+    </section>
+
+    <section class="block" aria-labelledby="h-counties">
+      <h2 id="h-counties">Counties</h2>
+      <ol class="county-list" id="county-list"></ol>
+      <button type="button" class="link-btn" id="county-more" aria-expanded="false">Show all counties</button>
+    </section>
+
+    <section class="block actions" aria-label="Share and download">
+      <button type="button" class="btn" id="copy-link">Copy link</button>
+      <button type="button" class="btn" id="save-png">Save image</button>
+      <button type="button" class="btn" id="download-csv">Download CSV</button>
+    </section>
+
+    <section class="block about">
+      <details>
+        <summary>About these data</summary>
+        <div id="about"></div>
+      </details>
+    </section>
+  </aside>
+
+  <main id="stage">
+    <div id="map" role="region" aria-label="Map of fire detections"></div>
+    <div id="boot" class="boot">Loading fire detections&hellip;</div>
+    <div id="busy" class="busy" hidden>Loading <span id="busy-text"></span>&hellip;</div>
+    <div id="toast" class="toast" role="status" hidden></div>
+    <div class="basemaps" id="basemaps" role="radiogroup" aria-label="Base map"></div>
+    <section id="timeline-wrap" aria-label="Timeline">
+      <div class="timeline-head">
+        <span class="timeline-title" id="timeline-title">Detections per week</span>
+        <span class="timeline-hint">Drag to choose dates</span>
+        <div class="seg tiny" role="radiogroup" aria-label="Timeline span" id="zoom-seg">
+          <button type="button" role="radio" data-zoom="all">All years</button>
+          <button type="button" role="radio" data-zoom="year">One year</button>
+          <button type="button" role="radio" data-zoom="fit">Fit dates</button>
+        </div>
+      </div>
+      <div class="timeline-body">
+        <canvas id="timeline" tabindex="0" aria-label="Detections over time. Drag to select a date range; arrow keys move it."></canvas>
+        <div id="timeline-tip" class="tip" hidden></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script type="module" src="./engine.js?v=__BUILD__"></script>
+</body>
+</html>

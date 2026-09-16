@@ -1,0 +1,86 @@
+# Refresh from NOAA and publish to GitHub Pages.
+#
+# Runs the whole pipeline every three hours. The raw archive (data/hms_text,
+# about 50 MB) is not in the repo; it lives in the Actions cache between runs,
+# so a routine run downloads only the last few days from NOAA. If the cache is
+# ever evicted, 01_refresh_data.R rebuilds the archive from scratch, which
+# takes about 40 minutes.
+#
+# A failed run publishes nothing, so the site keeps the last good build, and
+# GitHub emails the repository owner. The usual causes are NOAA being down
+# (the next run retries) or a new satellite or method name, which needs a row
+# in reference/.
+
+name: Refresh and publish
+
+on:
+  schedule:
+    - cron: "23 */3 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One run at a time, and never cancel one mid-refresh: the archive it saves is
+# what the next run builds on.
+concurrency:
+  group: refresh
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::tidyverse
+            any::sf
+            any::jsonlite
+            any::curl
+            any::here
+            any::rmapshaper
+
+      - name: Restore NOAA archive
+        uses: actions/cache/restore@v4
+        with:
+          path: data/hms_text
+          key: hms-archive-${{ github.run_id }}
+          restore-keys: hms-archive-
+
+      - name: Refresh, build data, assemble site
+        run: Rscript 00_run_pipeline.R
+
+      # Saved even when a later step fails, so a cold start interrupted by a
+      # NOAA outage resumes where it stopped instead of starting over.
+      - name: Save NOAA archive
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data/hms_text
+          key: hms-archive-${{ github.run_id }}
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: outputs/03_site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

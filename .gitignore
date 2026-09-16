@@ -1,0 +1,6 @@
+data/
+outputs/
+.Rhistory
+.RData
+.Rproj.user/
+.DS_Store

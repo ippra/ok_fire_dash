@@ -1,0 +1,1611 @@
+// engine.js - Oklahoma Fire Detections.
+//
+// Loads data/manifest.json, then the binary detection chunks a date range
+// needs, and draws them with MapLibre. Every count on the page is taken from
+// the same scan of the same rows, so the map, the tiles, the sensor list and
+// the county list always describe the same selection. The timeline is drawn
+// from the manifest's daily series, which 02_build_map_data.R counted from
+// those same rows.
+
+import * as maplibregl from "./assets/vendor/maplibre-gl-6.10.0/maplibre-gl.mjs";
+
+window.OKF_ENGINE_LOADED = true;
+
+const DAY_MS = 86400000;
+// Above this many detections, individual points stop being readable and the
+// GeoJSON hand-off to the worker takes seconds, so the map draws density.
+const POINT_CAP = 150000;
+const REFRESH_MS = 10 * 60 * 1000;
+const OK_BOUNDS = [[-103.0, 33.6], [-94.4, 37.0]];
+
+// Palettes ---------------------------------------------------------------------
+// Validated with the dataviz palette checks against each base map's own
+// background (#0e0e0e dark, #fafaf8 light). Intensity is one orange hue, ordered
+// so the strongest fires have the most contrast with the map beneath them:
+// brightest on dark maps, darkest on light ones. Sensor colors are the first
+// three categorical slots, the most that stay distinguishable on a map.
+const PALETTE = {
+  dark: {
+    frp: ["#b0530a", "#e07227", "#ffa069", "#ffd8c3"],
+    none: "#8f8d86",
+    ring: "#0e0e0e",
+    sensor: ["#3987e5", "#d95926", "#199e70"],
+    choro: ["#a54c01", "#cb6620", "#ee8545", "#feaf82", "#ffddca"],
+    countyLine: "rgba(255,255,255,0.22)",
+    stateLine: "rgba(255,255,255,0.75)",
+    hover: "#ffffff",
+  },
+  light: {
+    frp: ["#ff9a5f", "#dd6f23", "#ad5003", "#7b3600"],
+    none: "#9a988f",
+    ring: "#fafaf8",
+    sensor: ["#2a78d6", "#eb6834", "#1baf7a"],
+    choro: ["#ff9a5f", "#e7792f", "#c65e0b", "#a04a03", "#7b3600"],
+    countyLine: "rgba(40,30,20,0.25)",
+    stateLine: "rgba(40,30,20,0.8)",
+    hover: "#1c1b19",
+  },
+};
+
+const FRP_CLASSES = [
+  { label: "Under 10 MW", test: (f) => f < 10 },
+  { label: "10 to 50 MW", test: (f) => f < 50 },
+  { label: "50 to 100 MW", test: (f) => f < 100 },
+  { label: "100 MW or more", test: () => true },
+];
+const NOT_MEASURED = 4;
+
+const SENSOR_GROUPS = [
+  { label: "GOES", families: ["goes"] },
+  { label: "VIIRS", families: ["viirs"] },
+  { label: "MODIS, AVHRR and analyst-added", families: ["modis", "avhrr", "analyst"] },
+];
+
+const CARTO = "https://basemaps.cartocdn.com/gl/";
+const BASEMAPS = {
+  dark: { label: "Dark", tone: "dark", style: CARTO + "dark-matter-gl-style/style.json" },
+  light: { label: "Light", tone: "light", style: CARTO + "positron-gl-style/style.json" },
+  streets: { label: "Streets", tone: "light", style: CARTO + "voyager-gl-style/style.json" },
+  satellite: {
+    label: "Satellite",
+    tone: "dark",
+    style: {
+      version: 8,
+      sources: {
+        imagery: {
+          type: "raster",
+          tiles: ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
+          tileSize: 256,
+          maxzoom: 19,
+          attribution: "Imagery &copy; Esri, Maxar, Earthstar Geographics",
+        },
+        labels: {
+          type: "raster",
+          tiles: ["https://basemaps.cartocdn.com/rastertiles/dark_only_labels/{z}/{x}/{y}.png"],
+          tileSize: 256,
+          attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
+        },
+      },
+      layers: [
+        { id: "imagery", type: "raster", source: "imagery" },
+        { id: "sat-labels", type: "raster", source: "labels" },
+      ],
+    },
+  },
+};
+
+const PRESETS = [
+  { id: "1d", label: "Latest day", len: 1 },
+  { id: "7d", label: "7 days", len: 7 },
+  { id: "30d", label: "30 days", len: 30 },
+  { id: "90d", label: "90 days", len: 90 },
+  { id: "ytd", label: "Year to date" },
+  { id: "12m", label: "12 months", len: 365 },
+  { id: "all", label: "All years" },
+];
+
+// State ------------------------------------------------------------------------
+const state = {
+  start: 0,
+  end: 0,
+  preset: "30d",
+  view: "points",
+  colorBy: "frp",
+  basemap: "dark",
+  minFrp: 0,
+  families: null, // Set of family ids switched on
+  zoom: "year",
+  playing: false,
+  playDay: null,
+};
+
+let manifest = null;
+let epochMs = 0;
+let tz = "America/Chicago";
+let famIds = [];
+let srcFamily = null; // source index -> family index
+let srcGroup = null; // source index -> sensor color group
+let unavailableDays = new Set();
+let truncatedDays = new Set();
+let countyGeo = null;
+let current = null; // the last selection drawn
+let lastChecked = Date.now();
+let styleReady = false;
+let mapData = { points: emptyFC(), heat: emptyFC() };
+let heatRef = 1;
+let heatK = 0.2;
+let countyBins = null;
+let showAllCounties = false;
+
+const $ = (id) => document.getElementById(id);
+const nf = new Intl.NumberFormat("en-US");
+const nf1 = new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 });
+
+function emptyFC() {
+  return { type: "FeatureCollection", features: [] };
+}
+
+// Dates ------------------------------------------------------------------------
+// Day indexes count Oklahoma calendar days from the epoch. They are handled as
+// UTC midnights so that no browser time zone can shift a date by one.
+const dayDate = (d) => new Date(epochMs + d * DAY_MS);
+const iso = (d) => dayDate(d).toISOString().slice(0, 10);
+const isoToDay = (s) => Math.round((Date.parse(s + "T00:00:00Z") - epochMs) / DAY_MS);
+const fmtDay = (d, o = {}) =>
+  dayDate(d).toLocaleDateString("en-US", { timeZone: "UTC", month: "short", day: "numeric", year: "numeric", ...o });
+const fmtLocal = (ms, o) => new Date(ms).toLocaleString("en-US", { timeZone: tz, ...o });
+const clampDay = (d) => Math.max(0, Math.min(manifest.latest_day, d));
+
+function fmtRange(a, b) {
+  if (a === b) return fmtDay(a, { weekday: "short" });
+  const da = dayDate(a), db = dayDate(b);
+  const sameYear = da.getUTCFullYear() === db.getUTCFullYear();
+  return `${fmtDay(a, sameYear ? { year: undefined } : {})} – ${fmtDay(b)}`;
+}
+
+function compact(n) {
+  if (n >= 1e6) return nf1.format(n / 1e6) + "M";
+  if (n >= 1e4) return Math.round(n / 1e3) + "k";
+  if (n >= 1e3) return nf1.format(n / 1e3) + "k";
+  return nf.format(n);
+}
+
+// Manifest ---------------------------------------------------------------------
+async function fetchManifest() {
+  const r = await fetch(`data/manifest.json?t=${Date.now()}`, { cache: "no-store" });
+  if (!r.ok) throw new Error(`manifest.json: HTTP ${r.status}`);
+  return r.json();
+}
+
+function applyManifest(m) {
+  const keep = new Set(m.chunks.map((c) => c.file));
+  for (const file of chunkCache.keys()) if (!keep.has(file)) chunkCache.delete(file);
+
+  manifest = m;
+  epochMs = Date.parse(m.epoch + "T00:00:00Z");
+  tz = m.timezone;
+  famIds = m.families.map((f) => f.family);
+  srcFamily = Uint8Array.from(m.sources, (s) => famIds.indexOf(s.family));
+  srcGroup = Uint8Array.from(m.sources, (s) => SENSOR_GROUPS.findIndex((g) => g.families.includes(s.family)));
+  // A missing NOAA file for day D mostly holds detections from Oklahoma day D.
+  unavailableDays = new Set(m.unavailable_days.map(isoToDay));
+  truncatedDays = new Set((m.truncated_days || []).map(isoToDay));
+  if (!state.families) state.families = new Set(famIds);
+  buildCumulative();
+}
+
+// Prefix sums of the daily series over the families switched on, so any bin of
+// the timeline is two lookups.
+let cumulative = null;
+function buildCumulative() {
+  const n = manifest.latest_day + 1;
+  cumulative = new Float64Array(n + 1);
+  const on = famIds.filter((f) => state.families.has(f)).map((f) => manifest.daily[f]);
+  for (let d = 0; d < n; d++) {
+    let s = 0;
+    for (const series of on) s += series[d];
+    cumulative[d + 1] = cumulative[d] + s;
+  }
+}
+const countDays = (a, b) => cumulative[clampDay(b) + 1] - cumulative[clampDay(a)];
+
+// Chunks -----------------------------------------------------------------------
+// Each chunk is columnar: typed-array views straight onto the downloaded
+// buffer, laid out as 02_build_map_data.R documents. Names carry a content
+// hash, so a cached chunk is never stale.
+const chunkCache = new Map();
+const chunkReady = new Map();
+
+function loadChunk(meta) {
+  if (!chunkCache.has(meta.file)) {
+    const p = fetch("data/" + meta.file)
+      .then((r) => {
+        if (!r.ok) throw new Error(`${meta.file}: HTTP ${r.status}`);
+        return r.arrayBuffer();
+      })
+      .then((buf) => {
+        const n = meta.n;
+        if (buf.byteLength !== n * 20) throw new Error(`${meta.file} is ${buf.byteLength} bytes, expected ${n * 20}`);
+        const c = {
+          meta, n,
+          lon: new Float32Array(buf, 0, n),
+          lat: new Float32Array(buf, 4 * n, n),
+          frp: new Float32Array(buf, 8 * n, n),
+          minute: new Uint32Array(buf, 12 * n, n),
+          day: new Uint16Array(buf, 16 * n, n),
+          src: new Uint8Array(buf, 18 * n, n),
+          county: new Uint8Array(buf, 19 * n, n),
+        };
+        chunkReady.set(meta.file, true);
+        return c;
+      });
+    p.catch(() => { chunkCache.delete(meta.file); });
+    chunkCache.set(meta.file, p);
+  }
+  return chunkCache.get(meta.file);
+}
+
+const chunksFor = (a, b) => manifest.chunks.filter((c) => c.last_day >= a && c.first_day <= b);
+
+function lowerBound(arr, n, v) {
+  let lo = 0, hi = n;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid] < v) lo = mid + 1; else hi = mid;
+  }
+  return lo;
+}
+
+// Selection --------------------------------------------------------------------
+function frpClass(f) {
+  if (!(f >= 0)) return NOT_MEASURED;
+  for (let k = 0; k < FRP_CLASSES.length; k++) if (FRP_CLASSES[k].test(f)) return k;
+  return 3;
+}
+
+function passesFrp(f) {
+  if (state.minFrp === 0) return true;
+  if (state.minFrp === 1) return f >= 0;
+  return f >= state.minFrp;
+}
+
+function select(loaded, a, b) {
+  const famOn = famIds.map((f) => state.families.has(f));
+  const sel = {
+    a, b, loaded,
+    rowK: [], rowI: [],
+    total: 0,
+    byDay: new Int32Array(b - a + 1),
+    byCounty: new Int32Array(manifest.counties.length + 1),
+    byFamily: new Int32Array(famIds.length),
+    byClass: new Int32Array(5),
+    byGroup: new Int32Array(SENSOR_GROUPS.length),
+    maxFrp: -1, maxAt: null,
+  };
+  loaded.forEach((c, k) => {
+    for (let i = lowerBound(c.day, c.n, a); i < c.n && c.day[i] <= b; i++) {
+      const f = c.frp[i];
+      if (!passesFrp(f)) continue;
+      const fam = srcFamily[c.src[i]];
+      sel.byFamily[fam]++;
+      if (!famOn[fam]) continue;
+      sel.rowK.push(k);
+      sel.rowI.push(i);
+      sel.total++;
+      sel.byDay[c.day[i] - a]++;
+      sel.byCounty[c.county[i]]++;
+      sel.byClass[frpClass(f)]++;
+      sel.byGroup[srcGroup[c.src[i]]]++;
+      if (f > sel.maxFrp) { sel.maxFrp = f; sel.maxAt = [k, i]; }
+    }
+  });
+  return sel;
+}
+
+function activeRange() {
+  return state.playing ? [state.playDay, state.playDay] : [state.start, state.end];
+}
+
+// Update -----------------------------------------------------------------------
+let token = 0;
+async function update(retried = false) {
+  const my = ++token;
+  syncControls();
+  drawTimeline();
+  writeHash();
+  const [a, b] = activeRange();
+  const metas = chunksFor(a, b);
+  const pending = metas.filter((m) => !chunkReady.has(m.file));
+  if (pending.length) {
+    $("busy-text").textContent = pending.map((m) => m.id).join(", ");
+    $("busy").hidden = false;
+    $("tiles").classList.add("pending");
+  }
+  let loaded;
+  try {
+    loaded = await Promise.all(metas.map(loadChunk));
+  } catch (e) {
+    if (my !== token) return;
+    // Each deploy replaces the chunks with newly hashed names, so a page open
+    // across a deploy can ask for a file that is gone. Pick up the new
+    // manifest and try once more before reporting a failure.
+    if (!retried && /HTTP 404/.test(e.message)) {
+      await checkForUpdate({ quiet: true });
+      if (my === token) return update(true);
+      return;
+    }
+    $("busy").hidden = true;
+    toast("Could not load detections: " + e.message, 8000);
+    return;
+  }
+  if (my !== token) return;
+  $("busy").hidden = true;
+  $("tiles").classList.remove("pending");
+  current = select(loaded, a, b);
+  renderMap();
+  renderTiles();
+  renderFamilies();
+  renderCounties();
+  renderLegend();
+}
+
+// Map --------------------------------------------------------------------------
+const map = new maplibregl.Map({
+  container: "map",
+  style: BASEMAPS.dark.style,
+  bounds: OK_BOUNDS,
+  fitBoundsOptions: { padding: { top: 50, bottom: 170, left: 30, right: 30 } },
+  minZoom: 4,
+  maxZoom: 16,
+  attributionControl: { compact: true },
+  canvasContextAttributes: { preserveDrawingBuffer: true },
+});
+map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+map.addControl(new maplibregl.FullscreenControl({ container: $("stage") }), "top-right");
+map.addControl(new maplibregl.ScaleControl({ unit: "imperial" }), "bottom-right");
+
+const tone = () => BASEMAPS[state.basemap].tone;
+
+function effectiveView() {
+  if (state.view === "points" && current && current.total > POINT_CAP) return "heat";
+  return state.view;
+}
+
+function addOverlays() {
+  const P = PALETTE[tone()];
+  const layers = map.getStyle().layers;
+  const firstSymbol = layers.find((l) => l.type === "symbol" || l.id === "sat-labels");
+  const before = firstSymbol ? firstSymbol.id : undefined;
+
+  if (!map.getSource("okf-counties")) {
+    map.addSource("okf-counties", { type: "geojson", data: countyGeo, promoteId: "county" });
+  }
+  map.addSource("okf-state", { type: "geojson", data: "data/state.geojson" });
+  map.addSource("okf-points", { type: "geojson", data: mapData.points, buffer: 16 });
+  map.addSource("okf-heat", { type: "geojson", data: mapData.heat });
+
+  map.addLayer({
+    id: "okf-county-fill", type: "fill", source: "okf-counties",
+    paint: { "fill-color": choroplethColor(P), "fill-opacity": 0.8 },
+  }, before);
+  map.addLayer({
+    id: "okf-heat", type: "heatmap", source: "okf-heat",
+    paint: heatPaint(P),
+  }, before);
+  map.addLayer({
+    id: "okf-county-line", type: "line", source: "okf-counties",
+    paint: { "line-color": P.countyLine, "line-width": 0.6 },
+  }, before);
+  map.addLayer({
+    id: "okf-state-line", type: "line", source: "okf-state",
+    paint: { "line-color": P.stateLine, "line-width": 1.6 },
+  }, before);
+  map.addLayer({
+    id: "okf-points", type: "circle", source: "okf-points",
+    layout: { "circle-sort-key": ["match", ["get", "c"], NOT_MEASURED, -1, ["get", "c"]] },
+    paint: pointPaint(P),
+  }, before);
+  map.addLayer({
+    id: "okf-county-hover", type: "line", source: "okf-counties",
+    paint: {
+      "line-color": P.hover,
+      "line-width": ["case", ["boolean", ["feature-state", "hover"], false], 2.2, 0],
+    },
+  });
+  styleReady = true;
+  applyCountyState();
+  setVisibility();
+}
+
+function pointPaint(P) {
+  const radius = (s) => ["match", ["get", "c"], 0, 1.7 * s, 1, 2.3 * s, 2, 3.0 * s, 3, 3.8 * s, 2.0 * s];
+  return {
+    "circle-color": state.colorBy === "frp"
+      ? ["match", ["get", "c"], 0, P.frp[0], 1, P.frp[1], 2, P.frp[2], 3, P.frp[3], P.none]
+      : ["match", ["get", "g"], 0, P.sensor[0], 1, P.sensor[1], P.sensor[2]],
+    "circle-radius": ["interpolate", ["exponential", 1.5], ["zoom"], 5, radius(1), 9, radius(2), 13, radius(4)],
+    "circle-opacity": ["match", ["get", "c"], NOT_MEASURED, 0.8, 0.95],
+    "circle-stroke-color": P.ring,
+    "circle-stroke-width": ["interpolate", ["linear"], ["zoom"], 5, 0.3, 10, 1],
+    "circle-stroke-opacity": 0.7,
+  };
+}
+
+function heatPaint(P) {
+  const alpha = (hex, a) => {
+    const n = parseInt(hex.slice(1), 16);
+    return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`;
+  };
+  return {
+    "heatmap-weight": ["get", "w"],
+    "heatmap-intensity": ["interpolate", ["linear"], ["zoom"], 5, heatK, 8, heatK * 2.5, 12, heatK * 7.5],
+    "heatmap-radius": ["interpolate", ["exponential", 1.6], ["zoom"], 4, 4, 7, 9, 10, 24, 14, 70],
+    "heatmap-color": [
+      "interpolate", ["linear"], ["heatmap-density"],
+      0, "rgba(0,0,0,0)",
+      0.05, alpha(P.frp[0], 0.45),
+      0.3, P.frp[1],
+      0.6, P.frp[2],
+      0.9, P.frp[3],
+    ],
+    "heatmap-opacity": 0.92,
+  };
+}
+
+function choroplethColor(P) {
+  return [
+    "match", ["coalesce", ["feature-state", "bin"], -1],
+    0, P.choro[0], 1, P.choro[1], 2, P.choro[2], 3, P.choro[3], 4, P.choro[4],
+    "rgba(0,0,0,0)",
+  ];
+}
+
+function restyleOverlays() {
+  if (!styleReady) return;
+  const P = PALETTE[tone()];
+  for (const [k, v] of Object.entries(pointPaint(P))) map.setPaintProperty("okf-points", k, v);
+  for (const [k, v] of Object.entries(heatPaint(P))) map.setPaintProperty("okf-heat", k, v);
+  map.setPaintProperty("okf-county-fill", "fill-color", choroplethColor(P));
+  map.setPaintProperty("okf-county-line", "line-color", P.countyLine);
+  map.setPaintProperty("okf-state-line", "line-color", P.stateLine);
+  map.setPaintProperty("okf-county-hover", "line-color", P.hover);
+}
+
+function setVisibility() {
+  if (!styleReady) return;
+  const v = effectiveView();
+  const show = (id, on) => map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
+  show("okf-points", v === "points");
+  show("okf-heat", v === "heat");
+  show("okf-county-fill", v === "counties");
+  map.setPaintProperty("okf-county-line", "line-width", v === "counties" ? 0.9 : 0.6);
+}
+
+function renderMap() {
+  const sel = current;
+  const v = effectiveView();
+  const data = mapData;
+
+  if (v === "points") {
+    const features = new Array(sel.total);
+    for (let j = 0; j < sel.total; j++) {
+      const c = sel.loaded[sel.rowK[j]], i = sel.rowI[j];
+      features[j] = {
+        type: "Feature",
+        id: j,
+        geometry: { type: "Point", coordinates: [c.lon[i], c.lat[i]] },
+        properties: { c: frpClass(c.frp[i]), g: srcGroup[c.src[i]] },
+      };
+    }
+    data.points = { type: "FeatureCollection", features };
+    data.heat = emptyFC();
+  } else if (v === "heat") {
+    data.points = emptyFC();
+    data.heat = heatFeatures(sel);
+  } else {
+    data.points = emptyFC();
+    data.heat = emptyFC();
+  }
+  countyBins = computeCountyBins(sel);
+
+  if (!styleReady) return;
+  map.getSource("okf-points").setData(data.points);
+  map.getSource("okf-heat").setData(data.heat);
+  map.setPaintProperty("okf-heat", "heatmap-intensity", heatPaint(PALETTE[tone()])["heatmap-intensity"]);
+  applyCountyState();
+  setVisibility();
+  popup.remove();
+}
+
+// Density is drawn from a 0.02-degree grid (about 2 km) rather than raw
+// points: the same picture at the zooms a heat map is useful for, at a fraction
+// of the features. Weights are scaled to the 99th percentile cell so one flare
+// stack cannot wash out the state, and compressed so a county of scattered
+// grass fires still shows beside it.
+function heatFeatures(sel) {
+  const cell = 0.02;
+  const cells = new Map();
+  for (let j = 0; j < sel.total; j++) {
+    const c = sel.loaded[sel.rowK[j]], i = sel.rowI[j];
+    const key = Math.floor((c.lon[i] + 180) / cell) * 100000 + Math.floor((c.lat[i] + 90) / cell);
+    cells.set(key, (cells.get(key) || 0) + 1);
+  }
+  const counts = [...cells.values()].sort((x, y) => x - y);
+  heatRef = Math.max(3, counts[Math.floor(counts.length * 0.99)] || 1);
+  // Density adds up across neighbouring cells, so a week of scattered fires
+  // needs far more intensity than a year to be seen at all. Scaled to the
+  // number of occupied cells: about 0.2 for a year statewide, capped for a day.
+  heatK = Math.min(2, Math.max(0.12, 22 / Math.sqrt(Math.max(1, cells.size))));
+  const features = [];
+  for (const [key, n] of cells) {
+    const ix = Math.floor(key / 100000), iy = key % 100000;
+    features.push({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: [(ix + 0.5) * cell - 180, (iy + 0.5) * cell - 90] },
+      properties: { w: Math.min(1, Math.sqrt(n / heatRef)) },
+    });
+  }
+  return { type: "FeatureCollection", features };
+}
+
+// Counties are shaded by detections per 100 square miles, not raw counts: a
+// raw count mostly measures county size. Breaks are quintiles of the counties
+// that had any detections, rounded to readable numbers.
+function computeCountyBins(sel) {
+  const rates = manifest.counties.map((c) => ({
+    id: c.id, n: sel.byCounty[c.id], rate: (sel.byCounty[c.id] / c.sq_mi) * 100,
+  }));
+  const nonzero = rates.filter((r) => r.n > 0).map((r) => r.rate).sort((x, y) => x - y);
+  // Two significant figures: coarser rounding collapses neighbouring
+  // quintiles onto the same break and leaves shades of the ramp unused.
+  const nice = (x) => {
+    if (x <= 0) return 0;
+    const p = Math.pow(10, Math.floor(Math.log10(x)) - 1);
+    return Math.round(x / p) * p;
+  };
+  const breaks = [];
+  if (nonzero.length) {
+    for (const q of [0.2, 0.4, 0.6, 0.8]) {
+      const b = nice(nonzero[Math.floor(q * (nonzero.length - 1))]);
+      if (b > 0 && (breaks.length === 0 || b > breaks[breaks.length - 1])) breaks.push(b);
+    }
+  }
+  const binOf = (r) => {
+    if (r.n === 0) return -1;
+    let k = 0;
+    while (k < breaks.length && r.rate >= breaks[k]) k++;
+    // Spread the bins used across the ramp's full length when there are
+    // fewer than five, so two bins are not two nearly identical oranges.
+    return breaks.length >= 4 ? k : Math.round((k * 4) / Math.max(1, breaks.length));
+  };
+  return { breaks, rates, bin: new Map(rates.map((r) => [r.id, binOf(r)])) };
+}
+
+function applyCountyState() {
+  if (!styleReady || !countyBins) return;
+  for (const c of manifest.counties) {
+    map.setFeatureState({ source: "okf-counties", id: c.id }, { bin: countyBins.bin.get(c.id) });
+  }
+}
+
+// Map Interaction --------------------------------------------------------------
+const popup = new maplibregl.Popup({ closeButton: true, maxWidth: "300px", offset: 8 });
+const hoverTip = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 12, className: "okf-hover" });
+let hoveredCounty = null;
+
+map.on("click", (e) => {
+  if (!styleReady || !current) return;
+  const v = effectiveView();
+  if (v === "points") {
+    const pad = 8;
+    const box = [[e.point.x - pad, e.point.y - pad], [e.point.x + pad, e.point.y + pad]];
+    const ids = [...new Set(map.queryRenderedFeatures(box, { layers: ["okf-points"] }).map((f) => f.id))];
+    if (!ids.length) return;
+    showDetections(ids, e.lngLat);
+  } else if (v === "counties") {
+    const f = map.queryRenderedFeatures(e.point, { layers: ["okf-county-fill"] })[0];
+    if (f) zoomToCounty(f.id);
+  }
+});
+
+map.on("mousemove", (e) => {
+  if (!styleReady) return;
+  const v = effectiveView();
+  if (v === "points") {
+    const pad = 6;
+    const hit = map.queryRenderedFeatures([[e.point.x - pad, e.point.y - pad], [e.point.x + pad, e.point.y + pad]], { layers: ["okf-points"] });
+    map.getCanvas().style.cursor = hit.length ? "pointer" : "";
+  } else {
+    map.getCanvas().style.cursor = "";
+  }
+  if (v !== "counties" || !current) { clearHover(); return; }
+  const f = map.queryRenderedFeatures(e.point, { layers: ["okf-county-fill", "okf-county-line"] })[0];
+  if (!f) { clearHover(); return; }
+  if (hoveredCounty !== f.id) {
+    clearHover();
+    hoveredCounty = f.id;
+    map.setFeatureState({ source: "okf-counties", id: f.id }, { hover: true });
+  }
+  const c = manifest.counties[f.id - 1];
+  const n = current.byCounty[f.id];
+  const el = document.createElement("div");
+  line(el, "pop-when", `${c.name} County`);
+  line(el, "pop-frp", `${nf.format(n)} detection${n === 1 ? "" : "s"}`);
+  line(el, "pop-meta", `${nf1.format((n / c.sq_mi) * 100)} per 100 sq mi`);
+  hoverTip.setLngLat(e.lngLat).setDOMContent(el).addTo(map);
+  map.getCanvas().style.cursor = "pointer";
+});
+map.on("mouseout", clearHover);
+
+function clearHover() {
+  if (hoveredCounty != null && styleReady) {
+    map.setFeatureState({ source: "okf-counties", id: hoveredCounty }, { hover: false });
+  }
+  hoveredCounty = null;
+  hoverTip.remove();
+}
+
+function line(parent, cls, text) {
+  const d = document.createElement("div");
+  d.className = cls;
+  d.textContent = text;
+  parent.appendChild(d);
+  return d;
+}
+
+function describe(k, i) {
+  const c = current.loaded[k];
+  const src = manifest.sources[c.src[i]];
+  const fam = manifest.families[srcFamily[c.src[i]]];
+  const ms = c.minute[i] * 60000;
+  return {
+    when: fmtLocal(ms, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" }),
+    frp: c.frp[i],
+    sensor: fam.family === "analyst" ? `Analyst-added · ${src.satellite}` : `${fam.label} · ${src.satellite}`,
+    county: manifest.counties[c.county[i] - 1].name + " County",
+    lat: c.lat[i], lon: c.lon[i],
+  };
+}
+
+function showDetections(ids, lngLat) {
+  const rows = ids.map((j) => [current.rowK[j], current.rowI[j]]);
+  rows.sort((x, y) => (current.loaded[y[0]].frp[y[1]] || -1) - (current.loaded[x[0]].frp[x[1]] || -1));
+  const el = document.createElement("div");
+  for (const [k, i] of rows.slice(0, 6)) {
+    const d = describe(k, i);
+    const item = document.createElement("div");
+    item.className = "pop-item";
+    line(item, "pop-frp", d.frp >= 0 ? `${nf1.format(d.frp)} MW` : "Intensity not measured");
+    line(item, "pop-when", d.when);
+    line(item, "pop-meta", d.sensor);
+    line(item, "pop-meta", `${d.county} · ${d.lat.toFixed(4)}, ${d.lon.toFixed(4)}`);
+    el.appendChild(item);
+  }
+  if (rows.length > 6) line(el, "pop-more", `and ${rows.length - 6} more here - zoom in to separate them`);
+  popup.setLngLat(lngLat).setDOMContent(el).addTo(map);
+}
+
+function zoomToCounty(id) {
+  const b = manifest.counties[id - 1].bbox;
+  map.fitBounds([[b[0], b[1]], [b[2], b[3]]], { padding: { top: 60, bottom: 180, left: 40, right: 40 }, maxZoom: 11 });
+}
+
+map.on("moveend", () => writeHash());
+
+// Base Maps --------------------------------------------------------------------
+function setBasemap(id, { initial = false } = {}) {
+  if (!BASEMAPS[id]) id = "dark";
+  const changed = id !== state.basemap || initial;
+  state.basemap = id;
+  syncBasemapButtons();
+  if (!changed) return;
+  styleReady = false;
+  currentStyleLoaded = false;
+  usingFallback = false;
+  clearHover();
+  map.setStyle(BASEMAPS[id].style, { diff: false });
+  writeHash();
+}
+
+// Every style load, the first included, wipes our sources and layers. The
+// first one can finish before the manifest arrives, so overlays wait for both.
+// If a base map's style cannot be fetched, fall back to a plain background so
+// the detections, counties and state line still draw.
+const FALLBACK_STYLE = {
+  version: 8,
+  sources: {},
+  layers: [{ id: "background", type: "background", paint: { "background-color": "#0e0e0e" } }],
+};
+let usingFallback = false;
+let currentStyleLoaded = false;
+map.on("error", (e) => {
+  const msg = String((e && e.error && e.error.message) || "");
+  if (usingFallback || currentStyleLoaded || !/style|Failed to fetch|NetworkError|Load failed/i.test(msg)) return;
+  usingFallback = true;
+  toast("The base map could not load; showing detections on a plain background.", 6000);
+  map.setStyle(FALLBACK_STYLE, { diff: false });
+});
+
+let firstStyleLoaded = false;
+map.on("style.load", () => {
+  firstStyleLoaded = true;
+  currentStyleLoaded = true;
+  if (!manifest || !countyGeo) return;
+  addOverlays();
+  if (current) renderMap();
+});
+
+function syncBasemapButtons() {
+  for (const b of $("basemaps").children) b.setAttribute("aria-checked", String(b.dataset.basemap === state.basemap));
+}
+
+// Timeline ---------------------------------------------------------------------
+const tl = { canvas: $("timeline"), drag: null, hover: null, colors: null, layout: null };
+
+function readColors() {
+  const s = getComputedStyle(document.documentElement);
+  const v = (n) => s.getPropertyValue(n).trim();
+  tl.colors = { bar: v("--bar"), out: v("--bar-out"), grid: v("--grid"), muted: v("--muted"), text: v("--text"), accent: v("--accent") };
+}
+
+function timelineDomain() {
+  const latest = manifest.latest_day;
+  if (state.zoom === "all") return [0, latest];
+  if (state.zoom === "year") {
+    // The calendar year the range ends in, stretched back when the range
+    // starts earlier so the selection is never cut off.
+    const y = dayDate(state.end).getUTCFullYear();
+    const a = Math.min(state.start, isoToDay(`${y}-01-01`)), b = isoToDay(`${y}-12-31`);
+    return [Math.max(0, a), Math.min(latest, b)];
+  }
+  const len = state.end - state.start + 1;
+  const pad = Math.max(10, Math.round(len * 0.25));
+  return [Math.max(0, state.start - pad), Math.min(latest, state.end + pad)];
+}
+
+function drawTimeline() {
+  if (!manifest) return;
+  const cv = tl.canvas;
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  if (!W || !H) return;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) {
+    cv.width = Math.round(W * dpr);
+    cv.height = Math.round(H * dpr);
+  }
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  const C = tl.colors;
+
+  const [d0, d1] = timelineDomain();
+  const span = d1 - d0 + 1;
+  const L = 38, R = 8, T = 8, B = 18;
+  const pw = W - L - R, ph = H - T - B;
+  const binDays = [1, 2, 7, 14, 28, 56, 91].find((k) => (pw / span) * k >= 2.5) || 91;
+  const x = (d) => L + ((d - d0) / span) * pw;
+  tl.layout = { d0, d1, span, L, R, T, B, pw, ph, binDays, x };
+
+  const bins = [];
+  let max = 0;
+  for (let s = Math.floor(d0 / binDays) * binDays; s <= d1; s += binDays) {
+    const a = Math.max(s, d0), b = Math.min(s + binDays - 1, d1);
+    const v = countDays(a, b) * (binDays / (b - a + 1)); // partial edge bins scaled to a full bin
+    bins.push({ s, a, b, v, raw: countDays(a, b) });
+    if (v > max) max = v;
+  }
+  const niceMax = (() => {
+    if (max <= 0) return 1;
+    const p = Math.pow(10, Math.floor(Math.log10(max)));
+    return [1, 2, 2.5, 5, 10].map((m) => m * p).find((m) => m >= max);
+  })();
+  const y = (v) => T + ph - (v / niceMax) * ph;
+
+  // Gridlines and y labels
+  ctx.font = "11px " + getComputedStyle(document.body).fontFamily;
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "right";
+  for (const g of [niceMax / 2, niceMax]) {
+    ctx.strokeStyle = C.grid;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(L, Math.round(y(g)) + 0.5);
+    ctx.lineTo(W - R, Math.round(y(g)) + 0.5);
+    ctx.stroke();
+    ctx.fillStyle = C.muted;
+    ctx.fillText(compact(g), L - 6, y(g));
+  }
+
+  // Selection band
+  const [sa, sb] = [state.start, state.end];
+  const sx0 = x(sa), sx1 = Math.max(x(sb + 1), sx0 + 3);
+  ctx.fillStyle = C.accent;
+  ctx.globalAlpha = 0.1;
+  ctx.fillRect(sx0, T, sx1 - sx0, ph);
+  ctx.globalAlpha = 1;
+
+  // Bars
+  for (const bin of bins) {
+    const bx0 = x(bin.a), bx1 = x(bin.b + 1);
+    const gap = bx1 - bx0 >= 4 ? 1 : 0;
+    const top = y(bin.v);
+    const hgt = T + ph - top;
+    if (hgt <= 0) continue;
+    const inSel = bin.b >= sa && bin.a <= sb;
+    ctx.fillStyle = inSel ? C.bar : C.out;
+    const w = Math.max(1, bx1 - bx0 - gap);
+    const r = Math.min(2, w / 2, hgt);
+    ctx.beginPath();
+    ctx.roundRect(bx0, top, w, Math.max(hgt, 1), [r, r, 0, 0]);
+    ctx.fill();
+  }
+
+  // Baseline, with NOAA's missing days marked beneath it
+  ctx.fillStyle = C.out;
+  ctx.fillRect(L, T + ph, pw, 1);
+  ctx.fillStyle = C.muted;
+  for (const d of unavailableDays) if (d >= d0 && d <= d1) ctx.fillRect(x(d), T + ph + 2, Math.max(1, pw / span), 3);
+
+  // Selection edges
+  ctx.fillStyle = C.accent;
+  ctx.fillRect(sx0 - 1, T, 2, ph);
+  ctx.fillRect(sx1 - 1, T, 2, ph);
+
+  // Play head
+  if (state.playing) {
+    ctx.fillStyle = C.text;
+    ctx.fillRect(x(state.playDay + 0.5) - 1, T - 2, 2, ph + 4);
+  }
+
+  // X ticks
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+  const startDate = dayDate(d0);
+  const ticks = [];
+  if (span > 800) {
+    for (let yr = startDate.getUTCFullYear(); ; yr++) {
+      const d = isoToDay(`${yr}-01-01`);
+      if (d > d1) break;
+      if (d >= d0) ticks.push([d, String(yr)]);
+    }
+  } else if (span > 60) {
+    const cur = new Date(Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth(), 1));
+    const step = span > 400 ? 3 : 1;
+    while (true) {
+      const d = Math.round((cur.getTime() - epochMs) / DAY_MS);
+      if (d > d1) break;
+      if (d >= d0 && cur.getUTCMonth() % step === 0) {
+        const lab = cur.getUTCMonth() === 0
+          ? String(cur.getUTCFullYear())
+          : cur.toLocaleDateString("en-US", { timeZone: "UTC", month: "short" });
+        ticks.push([d, lab]);
+      }
+      cur.setUTCMonth(cur.getUTCMonth() + 1);
+    }
+  } else {
+    const every = span > 21 ? 7 : span > 8 ? 2 : 1;
+    for (let d = d0; d <= d1; d++) if ((d - d0) % every === 0) ticks.push([d, fmtDay(d, { year: undefined })]);
+  }
+  ctx.fillStyle = C.muted;
+  let lastRight = -Infinity;
+  for (const [d, lab] of ticks) {
+    const tx = x(d);
+    const w = ctx.measureText(lab).width;
+    ctx.fillRect(tx, T + ph, 1, 4);
+    if (tx + 3 > lastRight + 6 && tx + 3 + w < W) {
+      ctx.fillText(lab, tx + 3, H - 3);
+      lastRight = tx + 3 + w;
+    }
+  }
+
+  const unit = { 1: "day", 2: "2 days", 7: "week", 14: "2 weeks", 28: "4 weeks", 56: "8 weeks", 91: "13 weeks" }[binDays];
+  const allOn = state.families.size === famIds.length;
+  const which = allOn ? "" : ` · ${famIds.filter((f) => state.families.has(f)).map((f) => manifest.families[famIds.indexOf(f)].label).join(", ") || "no sensors"}`;
+  $("timeline-title").textContent = `Detections per ${unit}${which}`;
+}
+
+function dayAtX(px) {
+  const { L, pw, d0, span } = tl.layout;
+  return clampDay(Math.floor(d0 + ((px - L) / pw) * span));
+}
+
+tl.canvas.addEventListener("pointerdown", (e) => {
+  if (!tl.layout) return;
+  stopPlay();
+  const px = e.offsetX;
+  const { x } = tl.layout;
+  const edgeA = x(state.start), edgeB = x(state.end + 1);
+  const d = dayAtX(px);
+  if (Math.abs(px - edgeA) <= 6) tl.drag = { mode: "a" };
+  else if (Math.abs(px - edgeB) <= 6) tl.drag = { mode: "b" };
+  else if (px > edgeA && px < edgeB) tl.drag = { mode: "move", offset: d - state.start, len: state.end - state.start };
+  else tl.drag = { mode: "new", anchor: d };
+  tl.drag.moved = false;
+  tl.canvas.setPointerCapture(e.pointerId);
+  $("timeline-tip").hidden = true;
+});
+
+tl.canvas.addEventListener("pointermove", (e) => {
+  if (!tl.layout) return;
+  const d = dayAtX(e.offsetX);
+  if (!tl.drag) { showTimelineTip(e.offsetX, e.offsetY); return; }
+  const g = tl.drag;
+  g.moved = true;
+  if (g.mode === "new") [state.start, state.end] = [Math.min(g.anchor, d), Math.max(g.anchor, d)];
+  else if (g.mode === "a") [state.start, state.end] = [Math.min(d, state.end), Math.max(d, state.end)];
+  else if (g.mode === "b") [state.start, state.end] = [Math.min(state.start, d), Math.max(state.start, d)];
+  else {
+    const s = Math.max(0, Math.min(manifest.latest_day - g.len, d - g.offset));
+    [state.start, state.end] = [s, s + g.len];
+  }
+  state.preset = null;
+  syncDateControls();
+  drawTimeline();
+});
+
+const endDrag = () => {
+  if (!tl.drag) return;
+  const g = tl.drag;
+  tl.drag = null;
+  if (g.mode === "new" && !g.moved) {
+    // A click without a drag picks the bin under the pointer.
+    const b = tl.layout.binDays;
+    const s = Math.max(tl.layout.d0, Math.floor(g.anchor / b) * b);
+    [state.start, state.end] = [s, clampDay(s + b - 1)];
+    state.preset = null;
+  }
+  if (g.moved || g.mode === "new") update();
+};
+tl.canvas.addEventListener("pointerup", endDrag);
+tl.canvas.addEventListener("pointercancel", endDrag);
+tl.canvas.addEventListener("pointerleave", () => { if (!tl.drag) $("timeline-tip").hidden = true; });
+
+tl.canvas.addEventListener("keydown", (e) => {
+  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+  e.preventDefault();
+  step(e.key === "ArrowLeft" ? -1 : 1, e.shiftKey ? null : 1);
+});
+
+function showTimelineTip(px, py) {
+  const { binDays, d0, d1 } = tl.layout;
+  const d = dayAtX(px);
+  const s = Math.max(d0, Math.floor(d / binDays) * binDays);
+  const e = Math.min(d1, s + binDays - 1);
+  const n = countDays(s, e);
+  const tip = $("timeline-tip");
+  tip.textContent = "";
+  const b = document.createElement("b");
+  b.textContent = nf.format(n);
+  tip.append(b, ` detection${n === 1 ? "" : "s"} · ${fmtRange(s, e)}`);
+  if (binDays === 1 && unavailableDays.has(d)) tip.append(" · no NOAA file");
+  if (binDays === 1 && truncatedDays.has(d)) tip.append(" · NOAA file cut off");
+  tip.hidden = false;
+  const W = tl.canvas.clientWidth;
+  const tw = tip.offsetWidth;
+  tip.style.left = Math.max(0, Math.min(W - tw, px - tw / 2)) + "px";
+  tip.style.top = Math.max(-34, py - 40) + "px";
+}
+
+// Controls ---------------------------------------------------------------------
+function applyPreset(id) {
+  const latest = manifest.latest_day;
+  const p = PRESETS.find((q) => q.id === id);
+  if (p && p.len) [state.start, state.end] = [clampDay(latest - p.len + 1), latest];
+  else if (id === "ytd") [state.start, state.end] = [clampDay(isoToDay(`${dayDate(latest).getUTCFullYear()}-01-01`)), latest];
+  else if (id === "all") [state.start, state.end] = [0, latest];
+  else if (/^y\d{4}$/.test(id)) {
+    const yr = id.slice(1);
+    [state.start, state.end] = [clampDay(isoToDay(`${yr}-01-01`)), clampDay(isoToDay(`${yr}-12-31`))];
+  } else return false;
+  state.preset = id;
+  return true;
+}
+
+function buildControls() {
+  const presets = $("presets");
+  for (const p of PRESETS) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = p.label;
+    b.dataset.preset = p.id;
+    b.addEventListener("click", () => { stopPlay(); applyPreset(p.id); if (state.zoom === "fit") state.zoom = "year"; update(); });
+    presets.appendChild(b);
+  }
+  const ys = document.createElement("select");
+  ys.id = "year-select";
+  ys.setAttribute("aria-label", "Choose a year");
+  const first = dayDate(0).getUTCFullYear(), last = dayDate(manifest.latest_day).getUTCFullYear();
+  ys.add(new Option("Year…", ""));
+  for (let yr = last; yr >= first; yr--) ys.add(new Option(String(yr), "y" + yr));
+  ys.addEventListener("change", () => {
+    if (!ys.value) return;
+    stopPlay();
+    applyPreset(ys.value);
+    update();
+  });
+  presets.appendChild(ys);
+
+  const ds = $("date-start"), de = $("date-end");
+  const onDate = () => {
+    if (!ds.value || !de.value) return;
+    stopPlay();
+    const a = clampDay(isoToDay(ds.value)), b = clampDay(isoToDay(de.value));
+    [state.start, state.end] = [Math.min(a, b), Math.max(a, b)];
+    state.preset = null;
+    update();
+  };
+  ds.addEventListener("change", onDate);
+  de.addEventListener("change", onDate);
+
+  $("step-back").addEventListener("click", () => step(-1));
+  $("step-fwd").addEventListener("click", () => step(1));
+  $("play").addEventListener("click", () => (state.playing ? stopPlay(true) : startPlay()));
+
+  for (const b of $("view-seg").children) {
+    b.addEventListener("click", () => { state.view = b.dataset.view; clearHover(); update(); });
+  }
+  for (const b of $("color-seg").children) {
+    b.addEventListener("click", () => { state.colorBy = b.dataset.color; restyleOverlays(); syncControls(); renderLegend(); writeHash(); });
+  }
+  for (const b of $("zoom-seg").children) {
+    b.addEventListener("click", () => { state.zoom = b.dataset.zoom; syncControls(); drawTimeline(); writeHash(); });
+  }
+  $("min-frp").addEventListener("change", (e) => { state.minFrp = Number(e.target.value); update(); });
+
+  for (const [id, bm] of Object.entries(BASEMAPS)) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.setAttribute("role", "radio");
+    b.dataset.basemap = id;
+    b.textContent = bm.label;
+    b.addEventListener("click", () => setBasemap(id));
+    $("basemaps").appendChild(b);
+  }
+
+  $("county-more").addEventListener("click", () => {
+    showAllCounties = !showAllCounties;
+    $("county-more").setAttribute("aria-expanded", String(showAllCounties));
+    renderCounties();
+  });
+
+  $("copy-link").addEventListener("click", async () => {
+    writeHash();
+    try {
+      await navigator.clipboard.writeText(location.href);
+      toast("Link copied");
+    } catch {
+      toast("Copy the address bar to share this view");
+    }
+  });
+  $("save-png").addEventListener("click", savePng);
+  $("download-csv").addEventListener("click", downloadCsv);
+
+  document.addEventListener("keydown", (e) => {
+    if (e.target.closest("input, select, textarea, canvas")) return;
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      if (e.target.closest(".maplibregl-canvas-container")) return;
+      e.preventDefault();
+      step(e.key === "ArrowLeft" ? -1 : 1);
+    }
+  });
+}
+
+// Moves the range by its own length, or by `by` days when given - so a single
+// day steps a day, and a week steps a week.
+function step(dir, by = null) {
+  stopPlay();
+  const len = state.end - state.start + 1;
+  const shift = (by || len) * dir;
+  const latest = manifest.latest_day;
+  let a = state.start + shift, b = state.end + shift;
+  if (a < 0) [a, b] = [0, len - 1];
+  if (b > latest) [a, b] = [Math.max(0, latest - len + 1), latest];
+  if (a === state.start && b === state.end) return;
+  [state.start, state.end] = [a, b];
+  state.preset = null;
+  update();
+}
+
+function syncDateControls() {
+  const ds = $("date-start"), de = $("date-end");
+  ds.min = de.min = iso(0);
+  ds.max = de.max = iso(manifest.latest_day);
+  ds.value = iso(state.start);
+  de.value = iso(state.end);
+  const len = state.end - state.start + 1;
+  $("range-label").textContent = state.playing
+    ? `${fmtDay(state.playDay, { weekday: "short" })}`
+    : `${fmtRange(state.start, state.end)} · ${nf.format(len)} day${len === 1 ? "" : "s"}`;
+  $("step-back").disabled = state.start === 0;
+  $("step-fwd").disabled = state.end === manifest.latest_day;
+}
+
+function syncControls() {
+  syncDateControls();
+  for (const b of $("presets").querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.preset === state.preset));
+  const ys = $("year-select");
+  if (ys) ys.value = /^y\d{4}$/.test(state.preset || "") ? state.preset : "";
+  for (const b of $("view-seg").children) b.setAttribute("aria-checked", String(b.dataset.view === state.view));
+  for (const b of $("color-seg").children) {
+    b.setAttribute("aria-checked", String(b.dataset.color === state.colorBy));
+    b.disabled = state.view !== "points";
+  }
+  for (const b of $("zoom-seg").children) b.setAttribute("aria-checked", String(b.dataset.zoom === state.zoom));
+  $("min-frp").value = String(state.minFrp);
+  syncBasemapButtons();
+}
+
+// Play -------------------------------------------------------------------------
+let playTimer = null;
+async function startPlay() {
+  if (state.start === state.end) {
+    toast("Choose more than one day to play through");
+    return;
+  }
+  state.playing = true;
+  state.playDay = state.start;
+  $("play").setAttribute("aria-pressed", "true");
+  $("play").querySelector(".play-glyph").textContent = "❚❚";
+  $("play").querySelector(".play-text").textContent = "Pause";
+  $("busy-text").textContent = "the period";
+  $("busy").hidden = false;
+  await Promise.all(chunksFor(state.start, state.end).map(loadChunk)).catch(() => {});
+  $("busy").hidden = true;
+  tick();
+}
+
+async function tick() {
+  if (!state.playing) return;
+  await update();
+  if (!state.playing) return;
+  playTimer = setTimeout(() => {
+    if (!state.playing) return;
+    if (state.playDay >= state.end) { stopPlay(true); return; }
+    state.playDay++;
+    tick();
+  }, Number($("play-speed").value));
+}
+
+function stopPlay(redraw = false) {
+  if (!state.playing) return;
+  state.playing = false;
+  clearTimeout(playTimer);
+  $("play").setAttribute("aria-pressed", "false");
+  $("play").querySelector(".play-glyph").textContent = "▶";
+  $("play").querySelector(".play-text").textContent = "Play day by day";
+  if (redraw) update();
+}
+
+// Panel ------------------------------------------------------------------------
+function tile(parent, value, key, sub, onClick) {
+  const t = document.createElement("div");
+  t.className = "tile";
+  const v = document.createElement(onClick ? "button" : "div");
+  v.className = "v";
+  v.textContent = value;
+  if (onClick) { v.type = "button"; v.addEventListener("click", onClick); }
+  t.appendChild(v);
+  line(t, "k", key);
+  if (sub) line(t, "s", sub);
+  parent.appendChild(t);
+}
+
+function renderTiles() {
+  const sel = current;
+  const box = $("tiles");
+  box.textContent = "";
+  const days = sel.b - sel.a + 1;
+  let active = 0, peak = -1, peakN = 0;
+  for (let k = 0; k < days; k++) {
+    if (sel.byDay[k] > 0) active++;
+    if (sel.byDay[k] > peakN) { peakN = sel.byDay[k]; peak = sel.a + k; }
+  }
+  const nCounties = sel.byCounty.reduce((s, v, i) => s + (i > 0 && v > 0 ? 1 : 0), 0);
+
+  tile(box, nf.format(sel.total), "Detections", `in ${nCounties} of ${manifest.counties.length} counties`);
+  tile(box, `${nf.format(active)}`, "Days with detections", `of ${nf.format(days)} day${days === 1 ? "" : "s"}`);
+  if (peak >= 0 && days > 1) {
+    tile(box, fmtDay(peak, { year: dayDate(sel.a).getUTCFullYear() === dayDate(sel.b).getUTCFullYear() ? undefined : "numeric" }),
+      "Busiest day", `${nf.format(peakN)} detections · show this day`,
+      () => { stopPlay(); [state.start, state.end] = [peak, peak]; state.preset = null; update(); });
+  } else {
+    tile(box, days === 1 ? fmtDay(sel.a, { year: undefined }) : "None", days === 1 ? "Day shown" : "Busiest day", null);
+  }
+  if (sel.maxAt) {
+    const [k, i] = sel.maxAt;
+    const d = describe(k, i);
+    tile(box, `${nf.format(Math.round(sel.maxFrp))} MW`, "Most intense detection", `${d.county} · show on map`, () => {
+      if (state.view !== "points") { state.view = "points"; update().then(() => flyToDetection(k, i)); }
+      else flyToDetection(k, i);
+    });
+  } else {
+    tile(box, "Not measured", "Most intense detection", null);
+  }
+
+  const notes = [];
+  if (sel.b === manifest.latest_day && Date.now() - Date.parse(manifest.data_through) < 36 * 3600000) notes.push("The latest day is still coming in: NOAA adds detections through the day.");
+  let missing = 0;
+  for (const d of unavailableDays) if (d >= sel.a && d <= sel.b) missing++;
+  if (missing) notes.push(`NOAA published no file for ${missing} day${missing === 1 ? "" : "s"} in this period, so those days are gaps, not days without fire.`);
+  let cut = 0;
+  for (const d of truncatedDays) if (d >= sel.a && d <= sel.b) cut++;
+  if (cut) notes.push(`NOAA's file for ${cut === 1 ? "one day" : cut + " days"} in this period ends partway through, so ${cut === 1 ? "that day is" : "those days are"} missing some detections.`);
+  $("summary-note").textContent = notes.filter(Boolean).join(" ");
+}
+
+function flyToDetection(k, i) {
+  // Rows keep their place in `current` only until the next update, so look the
+  // detection up again by chunk and row.
+  const c = current.loaded[k];
+  const lngLat = [c.lon[i], c.lat[i]];
+  map.flyTo({ center: lngLat, zoom: Math.max(map.getZoom(), 10), speed: 1.6 });
+  map.once("moveend", () => {
+    let j = -1;
+    for (let q = 0; q < current.total; q++) if (current.loaded[current.rowK[q]] === c && current.rowI[q] === i) { j = q; break; }
+    if (j >= 0) showDetections([j], lngLat);
+  });
+}
+
+function renderFamilies() {
+  const box = $("families");
+  box.textContent = "";
+  manifest.families.forEach((f, idx) => {
+    const lab = document.createElement("label");
+    lab.className = "family";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = state.families.has(f.family);
+    cb.addEventListener("change", () => {
+      if (cb.checked) state.families.add(f.family); else state.families.delete(f.family);
+      buildCumulative();
+      update();
+    });
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = f.label;
+    const n = document.createElement("span");
+    n.className = "n";
+    n.textContent = nf.format(current.byFamily[idx]);
+    const d = document.createElement("span");
+    d.className = "d";
+    d.textContent = f.description;
+    lab.append(cb, name, n, d);
+    box.appendChild(lab);
+  });
+  const only = document.createElement("button");
+  only.type = "button";
+  only.className = "link-btn";
+  const viirsOnly = state.families.size === 1 && state.families.has("viirs");
+  only.textContent = viirsOnly ? "Turn all sensors back on" : "VIIRS only, for comparing years";
+  only.title = "GOES-16 began five-minute scans over Oklahoma in 2018 and multiplied detection counts. VIIRS detections run through the archive from 2017.";
+  only.addEventListener("click", () => {
+    state.families = viirsOnly ? new Set(famIds) : new Set(["viirs"]);
+    buildCumulative();
+    update();
+  });
+  box.appendChild(only);
+}
+
+function renderCounties() {
+  const sel = current;
+  const list = $("county-list");
+  list.textContent = "";
+  const rows = manifest.counties
+    .map((c) => ({ c, n: sel.byCounty[c.id] }))
+    .sort((x, y) => y.n - x.n || x.c.name.localeCompare(y.c.name));
+  const shown = showAllCounties ? rows : rows.filter((r) => r.n > 0).slice(0, 10);
+  if (!shown.length) {
+    const li = document.createElement("li");
+    li.className = "empty";
+    li.textContent = "No detections in this period.";
+    list.appendChild(li);
+  }
+  const max = rows[0].n || 1;
+  for (const r of shown) {
+    const li = document.createElement("li");
+    const b = document.createElement("button");
+    b.type = "button";
+    b.title = `Zoom to ${r.c.name} County`;
+    const name = document.createElement("span");
+    name.textContent = r.c.name;
+    const n = document.createElement("span");
+    n.className = "n";
+    n.textContent = nf.format(r.n);
+    const bar = document.createElement("span");
+    bar.className = "bar";
+    const fill = document.createElement("span");
+    fill.style.width = `${(r.n / max) * 100}%`;
+    bar.appendChild(fill);
+    b.append(name, n, bar);
+    b.addEventListener("click", () => zoomToCounty(r.c.id));
+    li.appendChild(b);
+    list.appendChild(li);
+  }
+  $("county-more").textContent = showAllCounties ? "Show top 10" : `Show all ${manifest.counties.length} counties`;
+}
+
+function renderLegend() {
+  const box = $("legend");
+  box.textContent = "";
+  const sel = current;
+  if (!sel) return;
+  const P = PALETTE[tone()];
+  const v = effectiveView();
+
+  if (state.view === "points" && v === "heat") {
+    line(box, "warn", `${nf.format(sel.total)} detections are too many to draw one by one, so the map shows their density. Narrow the dates or raise the minimum intensity to see individual detections.`);
+  }
+
+  const row = (color, label, n, shape = "dot") => {
+    const r = document.createElement("div");
+    r.className = "row";
+    const sw = document.createElement("span");
+    sw.className = shape;
+    sw.style.background = color;
+    if (shape === "swatch" && color === "transparent") sw.style.boxShadow = "inset 0 0 0 1px var(--control-border)";
+    const l = document.createElement("span");
+    l.textContent = label;
+    r.append(sw, l);
+    if (n != null) {
+      const c = document.createElement("span");
+      c.className = "n";
+      c.textContent = nf.format(n);
+      r.appendChild(c);
+    }
+    box.appendChild(r);
+  };
+
+  if (v === "points" && state.colorBy === "frp") {
+    line(box, "note", "Fire radiative power, in megawatts");
+    for (let k = 3; k >= 0; k--) row(P.frp[k], FRP_CLASSES[k].label, sel.byClass[k]);
+    row(P.none, "Not measured", sel.byClass[NOT_MEASURED]);
+  } else if (v === "points") {
+    SENSOR_GROUPS.forEach((g, k) => row(P.sensor[k], g.label, sel.byGroup[k]));
+  } else if (v === "heat") {
+    line(box, "note", "Density of detections");
+    const ramp = document.createElement("div");
+    ramp.className = "ramp";
+    for (const c of P.frp) {
+      const s = document.createElement("span");
+      s.style.background = c;
+      ramp.appendChild(s);
+    }
+    box.appendChild(ramp);
+    const labs = document.createElement("div");
+    labs.className = "ramp-labels";
+    labs.append(Object.assign(document.createElement("span"), { textContent: "Fewer" }), Object.assign(document.createElement("span"), { textContent: "More" }));
+    box.appendChild(labs);
+  } else {
+    line(box, "note", "Detections per 100 square miles");
+    const br = countyBins.breaks;
+    const used = [...new Set([...countyBins.bin.values()].filter((b) => b >= 0))].sort((x, y) => y - x);
+    const fmt = (x) => nf1.format(x);
+    const labels = [];
+    for (let k = 0; k <= br.length; k++) {
+      const lo = k === 0 ? 0 : br[k - 1], hi = br[k];
+      labels.push(k === 0 ? `Under ${fmt(hi ?? Infinity)}` : hi == null ? `${fmt(lo)} or more` : `${fmt(lo)} to ${fmt(hi)}`);
+    }
+    if (!br.length) labels[0] = "Any";
+    const binIndex = (k) => (br.length >= 4 ? k : Math.round((k * 4) / Math.max(1, br.length)));
+    for (let k = br.length; k >= 0; k--) {
+      const bin = binIndex(k);
+      if (!used.includes(bin)) continue;
+      const n = [...countyBins.bin.values()].filter((b) => b === bin).length;
+      row(P.choro[bin], labels[k], n, "swatch");
+    }
+    const zero = [...countyBins.bin.values()].filter((b) => b === -1).length;
+    if (zero) row("transparent", "No detections", zero, "swatch");
+    line(box, "note", "Counts are counties. Hover a county for its total.");
+  }
+}
+
+// Sharing ----------------------------------------------------------------------
+function writeHash() {
+  if (!manifest) return;
+  const p = new URLSearchParams();
+  if (state.preset && !/^y/.test(state.preset)) p.set("p", state.preset);
+  else if (state.preset) p.set("y", state.preset.slice(1));
+  else p.set("d", `${iso(state.start)}_${iso(state.end)}`);
+  if (state.view !== "points") p.set("v", state.view);
+  if (state.colorBy !== "frp") p.set("c", state.colorBy);
+  if (state.basemap !== "dark") p.set("b", state.basemap);
+  if (state.minFrp) p.set("m", String(state.minFrp));
+  if (state.families.size !== famIds.length) p.set("s", famIds.filter((f) => state.families.has(f)).join("."));
+  if (state.zoom !== "year") p.set("t", state.zoom);
+  const c = map.getCenter();
+  p.set("map", `${map.getZoom().toFixed(2)}/${c.lat.toFixed(3)}/${c.lng.toFixed(3)}`);
+  history.replaceState(null, "", "#" + p.toString());
+}
+
+function readHash() {
+  const p = new URLSearchParams(location.hash.slice(1));
+  if (p.has("p")) applyPreset(p.get("p")) || applyPreset("30d");
+  else if (p.has("y")) applyPreset("y" + p.get("y")) || applyPreset("30d");
+  else if (p.has("d")) {
+    const [a, b] = p.get("d").split("_").map(isoToDay);
+    if (Number.isFinite(a) && Number.isFinite(b)) {
+      [state.start, state.end] = [clampDay(Math.min(a, b)), clampDay(Math.max(a, b))];
+      state.preset = null;
+    } else applyPreset("30d");
+  } else applyPreset("30d");
+  if (["points", "heat", "counties"].includes(p.get("v"))) state.view = p.get("v");
+  if (p.get("c") === "sensor") state.colorBy = "sensor";
+  if (BASEMAPS[p.get("b")]) state.basemap = p.get("b");
+  if ([1, 10, 50, 100].includes(Number(p.get("m")))) state.minFrp = Number(p.get("m"));
+  if (p.has("s")) {
+    const s = p.get("s").split(".").filter((f) => famIds.includes(f));
+    if (s.length) state.families = new Set(s);
+  }
+  if (["all", "year", "fit"].includes(p.get("t"))) state.zoom = p.get("t");
+  const m = (p.get("map") || "").split("/").map(Number);
+  if (m.length === 3 && m.every(Number.isFinite)) map.jumpTo({ zoom: m[0], center: [m[2], m[1]] });
+}
+
+function savePng() {
+  map.once("render", () => {
+    const src = map.getCanvas();
+    const dpr = src.width / src.clientWidth;
+    const head = Math.round(64 * dpr), foot = Math.round(26 * dpr);
+    const out = document.createElement("canvas");
+    out.width = src.width;
+    out.height = src.height + head + foot;
+    const ctx = out.getContext("2d");
+    const dark = tone() === "dark";
+    ctx.fillStyle = dark ? "#0e0e0e" : "#fafaf8";
+    ctx.fillRect(0, 0, out.width, out.height);
+    ctx.drawImage(src, 0, head);
+    const ink = dark ? "#f4f3ef" : "#1c1b19", sub = dark ? "#c3c2b7" : "#52514e";
+    const [a, b] = activeRange();
+    ctx.fillStyle = ink;
+    ctx.font = `600 ${20 * dpr}px ${getComputedStyle(document.body).fontFamily}`;
+    ctx.fillText("Oklahoma fire detections", 16 * dpr, 28 * dpr);
+    ctx.fillStyle = sub;
+    ctx.font = `${13.5 * dpr}px ${getComputedStyle(document.body).fontFamily}`;
+    const view = { points: "detections", heat: "density", counties: "detections per 100 sq mi" }[effectiveView()];
+    ctx.fillText(`${fmtRange(a, b)} · ${nf.format(current.total)} satellite detections · map shows ${view}`, 16 * dpr, 50 * dpr);
+    ctx.font = `${11 * dpr}px ${getComputedStyle(document.body).fontFamily}`;
+    const credit = state.basemap === "satellite" ? "Imagery © Esri · Labels © CARTO, OpenStreetMap" : "Base map © CARTO, OpenStreetMap contributors";
+    ctx.fillText(`Data: NOAA Hazard Mapping System · IPPRA, University of Oklahoma · ${credit}`, 16 * dpr, out.height - 9 * dpr);
+    out.toBlob((blob) => saveBlob(blob, `ok_fire_detections_${iso(a)}_${iso(b)}.png`));
+  });
+  map.triggerRepaint();
+}
+
+function downloadCsv() {
+  const sel = current;
+  if (!sel || !sel.total) { toast("No detections to download"); return; }
+  const head = "date_local,time_local,datetime_utc,latitude,longitude,county,sensor,satellite,method,frp_mw\n";
+  const parts = [head];
+  const timeFmt = new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false });
+  let buf = [];
+  for (let j = 0; j < sel.total; j++) {
+    const c = sel.loaded[sel.rowK[j]], i = sel.rowI[j];
+    const s = manifest.sources[c.src[i]];
+    const ms = c.minute[i] * 60000;
+    const f = c.frp[i];
+    buf.push([
+      iso(c.day[i]), timeFmt.format(ms), new Date(ms).toISOString().slice(0, 16) + "Z",
+      c.lat[i].toFixed(4), c.lon[i].toFixed(4), manifest.counties[c.county[i] - 1].name,
+      manifest.families[srcFamily[c.src[i]]].label, s.satellite, s.method, f >= 0 ? f.toFixed(2) : "",
+    ].join(","));
+    if (buf.length === 5000) { parts.push(buf.join("\n") + "\n"); buf = []; }
+  }
+  if (buf.length) parts.push(buf.join("\n") + "\n");
+  saveBlob(new Blob(parts, { type: "text/csv" }), `ok_fire_detections_${iso(sel.a)}_${iso(sel.b)}.csv`);
+}
+
+function saveBlob(blob, name) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+
+let toastTimer = null;
+function toast(msg, ms = 3000) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.hidden = true; }, ms);
+}
+
+// Freshness --------------------------------------------------------------------
+function renderFreshness() {
+  const through = Date.parse(manifest.data_through);
+  const ageH = (Date.now() - through) / 3600000;
+  const mins = Math.round((Date.now() - lastChecked) / 60000);
+  $("freshness-text").textContent =
+    `Data through ${fmtLocal(through, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" })}` +
+    ` · checked ${mins < 1 ? "just now" : mins + " min ago"}`;
+  $("freshness").classList.toggle("stale", ageH > 36);
+  $("freshness").title = ageH > 36
+    ? "The newest detection is more than a day and a half old. NOAA may be delayed."
+    : "This page checks for new detections every 10 minutes.";
+}
+
+async function checkForUpdate({ quiet = false } = {}) {
+  let m;
+  try { m = await fetchManifest(); } catch { return; }
+  lastChecked = Date.now();
+  if (m.build !== manifest.build) {
+    const followLatest = state.preset && !/^y/.test(state.preset);
+    const atLatest = state.end === manifest.latest_day;
+    const newData = m.total !== manifest.total || m.data_through !== manifest.data_through;
+    applyManifest(m);
+    if (followLatest) applyPreset(state.preset);
+    else if (atLatest && !state.playing) {
+      const len = state.end - state.start;
+      [state.start, state.end] = [clampDay(m.latest_day - len), m.latest_day];
+    }
+    renderAbout();
+    if (quiet) { renderFreshness(); return; }
+    if (!state.playing) await update();
+    if (newData) toast(`New detections loaded - data through ${fmtLocal(Date.parse(m.data_through), { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`, 5000);
+  }
+  renderFreshness();
+}
+
+function renderAbout() {
+  const m = manifest;
+  const box = $("about");
+  box.textContent = "";
+  const p = (html) => { const e = document.createElement("p"); e.innerHTML = html; box.appendChild(e); };
+  const through = fmtLocal(Date.parse(m.data_through), { month: "long", day: "numeric", year: "numeric" });
+  p(`Each point is a satellite pixel where NOAA's <a href="https://www.ospo.noaa.gov/Products/land/hms.html">Hazard Mapping System</a> found the heat signature of a fire. Analysts review the automated detections from GOES, VIIRS, MODIS and AVHRR satellites, delete false ones, and add fires the algorithms missed.`);
+  p(`A detection is not a fire. One grass fire can be seen by several satellites and by GOES every few minutes, so it can leave dozens of detections. Some detections are industrial heat sources such as gas flares.`);
+  p(`<strong>Intensity</strong> is fire radiative power in megawatts. NOAA reports none for analyst-added points, AVHRR, and some GOES detections; those show as "not measured".`);
+  p(`<strong>Comparing years.</strong> Counts depend on which satellites were flying. GOES-16 began five-minute scans over Oklahoma in 2018, NOAA-20 joined VIIRS coverage in 2018 and NOAA-21 in 2023, and each raised detection counts without more fire. VIIRS alone, from 2017 on, is the most consistent series, though NOAA-20 and NOAA-21 still add to it.`);
+  p(`<strong>Dates</strong> are Oklahoma calendar days in Central Time. NOAA timestamps are UTC, so an evening fire is dated the day it burned, not the next UTC day.`);
+  p(`<strong>Coverage.</strong> ${nf.format(m.total)} detections inside Oklahoma from ${fmtDay(0, { month: "long" })} through ${through}.` +
+    (m.unavailable_days.length ? ` NOAA published no file for ${m.unavailable_days.length} day${m.unavailable_days.length === 1 ? "" : "s"}; they are marked beneath the timeline.` : "") +
+    ((m.truncated_days || []).length ? ` NOAA's file for ${m.truncated_days.length} day${m.truncated_days.length === 1 ? "" : "s"} (${m.truncated_days.join(", ")}) ends partway through a record, so ${m.truncated_days.length === 1 ? "it is" : "they are"} incomplete.` : ""));
+  p(`<strong>Updates.</strong> The data are refreshed from NOAA automatically, and this page checks for new detections every 10 minutes while it is open.`);
+  p(`Built by the <a href="https://ippra.net">Institute for Public Policy Research and Analysis</a> at the University of Oklahoma.`);
+}
+
+// Boot -------------------------------------------------------------------------
+async function boot() {
+  readColors();
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { readColors(); drawTimeline(); });
+
+  const [m, counties] = await Promise.all([
+    fetchManifest(),
+    fetch("data/counties.geojson").then((r) => {
+      if (!r.ok) throw new Error(`counties.geojson: HTTP ${r.status}`);
+      return r.json();
+    }),
+  ]);
+  countyGeo = counties;
+  applyManifest(m);
+  buildControls();
+  readHash();
+  buildCumulative();
+  renderAbout();
+  renderFreshness();
+
+  const initialBasemap = state.basemap;
+  state.basemap = "dark";
+  if (initialBasemap !== "dark") setBasemap(initialBasemap);
+  else if (firstStyleLoaded) addOverlays();
+
+  new ResizeObserver(() => drawTimeline()).observe(tl.canvas);
+  await update();
+  $("boot").hidden = true;
+
+  setInterval(checkForUpdate, REFRESH_MS);
+  setInterval(renderFreshness, 60000);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && Date.now() - lastChecked > REFRESH_MS) checkForUpdate();
+  });
+}
+
+boot().catch((e) => {
+  const l = $("boot");
+  l.hidden = false;
+  l.classList.add("boot-failed");
+  l.textContent = "The map failed to start.\n\n" + (e && e.message ? e.message : String(e));
+  console.error(e);
+});

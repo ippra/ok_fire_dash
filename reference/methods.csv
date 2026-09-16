@@ -1,0 +1,8 @@
+method_raw,family,note
+ABBA,goes,"WF_ABBA, the GOES fire algorithm before FDC"
+FDC,goes,"GOES-R Fire Detection and Characterization"
+NGFS,goes,"Next Generation Fire System, NOAA's GOES algorithm from 2026"
+VIIRS,viirs,"VIIRS active fire product"
+MODIS,modis,"MODIS active fire product"
+FIMMA,avhrr,"Fire Identification, Mapping and Monitoring Algorithm, AVHRR; reports no FRP"
+ANALYSIS,analyst,"Placed by a NOAA analyst; reports no FRP"

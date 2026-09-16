@@ -1,0 +1,3 @@
+file,rows,reason
+hms_fire20151113.csv,1,"YearDay is 0; analyst-added point, satellite UNKNOWN"
+hms_fire20160219.csv,19,"YearDay holds a four-digit clock time (645 to 1815) instead of a year and day; analyst-added points, satellite UNKNOWN"
