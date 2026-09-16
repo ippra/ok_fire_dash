@@ -1,10 +1,11 @@
 # Refresh from NOAA and publish to GitHub Pages.
 #
-# Runs the whole pipeline every three hours. The raw archive (data/hms_text,
-# about 50 MB) is not in the repo; it lives in the Actions cache between runs,
-# so a routine run downloads only the last few days from NOAA. If the cache is
-# ever evicted, 01_refresh_data.R rebuilds the archive from scratch, which
-# takes about 40 minutes.
+# Runs the whole pipeline every three hours. The raw archives are not in the
+# repo; they live in the Actions cache between runs, so a routine run downloads
+# only the last few days. Each has its own cache entry, so adding one never
+# invalidates another. If a cache is evicted, the refresh rebuilds that archive
+# from scratch: about 40 minutes for NOAA detections (data/hms_text, 50 MB),
+# about 5 for Oklahoma IPAWS messages (data/ipaws, 30 MB, read out of 1.8 GB).
 #
 # A failed run publishes nothing, so the site keeps the last good build, and
 # GitHub emails the repository owner. The usual causes are NOAA being down
@@ -51,6 +52,7 @@ jobs:
             any::curl
             any::here
             any::rmapshaper
+            any::xml2
 
       - name: Restore NOAA archive
         uses: actions/cache/restore@v4
@@ -58,6 +60,13 @@ jobs:
           path: data/hms_text
           key: hms-archive-${{ github.run_id }}
           restore-keys: hms-archive-
+
+      - name: Restore IPAWS archive
+        uses: actions/cache/restore@v4
+        with:
+          path: data/ipaws
+          key: ipaws-archive-${{ github.run_id }}
+          restore-keys: ipaws-archive-
 
       - name: Refresh, build data, assemble site
         run: Rscript 00_run_pipeline.R
@@ -71,9 +80,16 @@ jobs:
           path: data/hms_text
           key: hms-archive-${{ github.run_id }}
 
+      - name: Save IPAWS archive
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data/ipaws
+          key: ipaws-archive-${{ github.run_id }}
+
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: outputs/05_site
+          path: outputs/07_site
 
   deploy:
     needs: build

@@ -1,8 +1,9 @@
 # ok_fire_dash - Oklahoma Fire Detections
 
 A static site that maps every satellite fire detection in Oklahoma since
-2015 from NOAA's Hazard Mapping System (HMS), and every National Weather
-Service Fire Warning issued for Oklahoma, for any range of dates, and updates
+2015 from NOAA's Hazard Mapping System (HMS), every National Weather Service
+Fire Warning issued for Oklahoma, and every Wireless Emergency Alert (WEA)
+sent to Oklahoma phones about a wildfire, for any range of dates, and updates
 itself as new data are published.
 
 It replaces `NOAA FIRE DATA/ok_fire_map/fire_map.R`, which baked the whole
@@ -31,6 +32,11 @@ loads only the dates you ask for, so a first visit downloads about 2 MB.
   outline for older warnings issued without one. A panel lists them, a tile
   counts them, the timeline marks each one, and clicking one gives the time,
   counties, requesting agency, the NWS summary and the full text.
+- **Wildfire WEAs.** Wireless Emergency Alerts about wildfire, from any
+  sender, are outlined in aqua in the area the sender drew, with their own
+  list, tile, timeline row and toggle. Clicking one shows the exact text sent
+  to phones, the longer message, the sender, and whether it was cancelled
+  early. Where alerts overlap, one click lists every WEA and warning there.
 - **Filters** by sensor (GOES, VIIRS, MODIS, AVHRR, analyst-added) and minimum
   intensity. Every number on the page follows the filters.
 - **Summary** of the period: detections, days with detections, the busiest
@@ -51,35 +57,33 @@ against the project root, so nothing is machine-specific.
 
 | step | what it is |
 |---|---|
-| `00_run_pipeline.R` | runs 01-05; the entry point for a scheduled update |
+| `00_run_pipeline.R` | runs 01-07; the entry point for a scheduled update |
 | `01_refresh_data.R` | tops up `data/hms_text/` from NOAA's daily text files. **Incremental**: fetches days not on disk plus the last 5, which NOAA is still revising. Downloads run one at a time: NOAA's server stalled every parallel transfer R attempted |
 | `02_refresh_warnings.R` | re-pulls every NWS Fire Warning since 2015 from the Iowa Environmental Mesonet into `data/frw_text/`: about 430 KB, under a second, so no incremental state |
-| `03_build_map_data.R` | clips to Oklahoma, assigns county and local day, writes binary detection chunks, the manifest and county outlines → `outputs/03_map_data/` |
-| `04_build_warnings.R` | keeps Oklahoma's warnings, parses their areas, polygons, expiry and summary → `outputs/04_warnings/` |
-| `05_build_dashboard.R` | copies `site/`, the map data and the warnings into one static directory → `outputs/05_site/` |
+| `03_refresh_weas.R` | tops up `data/ipaws/` from FEMA's IPAWS archive: every non-NWS message since the newest on disk, less 3 days, keeping those naming an Oklahoma county. The first run reads about 80,000 messages (1.8 GB) in 5 minutes |
+| `04_build_map_data.R` | clips to Oklahoma, assigns county and local day, writes binary detection chunks, the manifest and county outlines → `outputs/04_map_data/` |
+| `05_build_warnings.R` | keeps Oklahoma's warnings, parses their areas, polygons, expiry and summary → `outputs/05_warnings/` |
+| `06_build_weas.R` | picks the wildfire WEAs, parses their polygons, counties and time in force, including early cancellations → `outputs/06_weas/` |
+| `07_build_dashboard.R` | copies `site/`, the map data, warnings and WEAs into one static directory → `outputs/07_site/` |
 
 ```
-NOAA HMS daily text files           IEM Fire Warning text archive
-        │                                   │
-01_refresh_data.R                   02_refresh_warnings.R
-        │   cold start ~40 min,             │   full pull, under a second
-        │   routine refresh seconds         │
-data/hms_text/                      data/frw_text/
-        │                                   │
-        │   reference/ satellites,          │   reference/ok_zone_county.csv
-        │   methods, counties               │
-        ▼                                   │
-03_build_map_data.R  ─── counties ────────► 04_build_warnings.R
-        │   about 15 seconds                │   seconds
-        ▼                                   ▼
-outputs/03_map_data/                outputs/04_warnings/
-        │                                   │
-        └──────────────┬────────────────────┘
-                       │   site/ (front end source)
-                       ▼
-             05_build_dashboard.R           seconds
-                       │
-             outputs/05_site/               the deployable site
+NOAA HMS text files      IEM Fire Warning text       FEMA IPAWS archive
+        │                        │                          │
+01_refresh_data.R        02_refresh_warnings.R      03_refresh_weas.R
+        │                        │                          │
+data/hms_text/           data/frw_text/             data/ipaws/
+        │                        │                          │
+04_build_map_data.R ── counties ─┼──────────────────────────┤
+        │                        ▼                          ▼
+        │                05_build_warnings.R        06_build_weas.R
+        │                        │                          │
+outputs/04_map_data/     outputs/05_warnings/       outputs/06_weas/
+        └────────────────────────┼──────────────────────────┘
+                                 │   site/ (front end source)
+                                 ▼
+                       07_build_dashboard.R
+                                 │
+                       outputs/07_site/             the deployable site
 ```
 
 ## Building and previewing
@@ -89,7 +93,7 @@ Rscript 00_run_pipeline.R     # refresh, build data, assemble site
 python3 preview.py            # http://localhost:8902
 ```
 
-R packages: `tidyverse`, `sf`, `jsonlite`, `curl`, `here`, `rmapshaper`.
+R packages: `tidyverse`, `sf`, `jsonlite`, `curl`, `here`, `rmapshaper`, `xml2`.
 `tigris` only to regenerate the county file.
 
 Every script stops loudly instead of producing a quietly wrong site: a NOAA
@@ -97,7 +101,9 @@ file that reads short, a day missing from the archive, a satellite or method
 name not in `reference/`, a negative intensity that is not NOAA's -999 code, a
 county join that changes the row count, a chunk the manifest lists but the disk
 lacks, a warning whose UGC line, expiry or polygon does not parse or whose zone
-resolves to no county, and R or CSV files in the published directory all halt
+resolves to no county, an IPAWS download whose pages do not add up to the
+count FEMA promised, a WEA that mentions fire but is neither classed as
+wildfire nor reviewed, and R or CSV files in the published directory all halt
 the build. A
 failed run leaves the last good site in place.
 
@@ -164,9 +170,33 @@ selected date between the Oklahoma day it was issued and the day it expired,
 so an evening warning running past midnight shows on both days. During
 playback the map shows only the warnings in force at the clock.
 
+**WEAs come from state and local senders, not the NWS.** The NWS sends 98% of
+IPAWS messages but no Fire Warnings as WEAs; in Oklahoma, wildfire WEAs are
+sent by county and city emergency management and Oklahoma Forestry Services,
+relayed through Oklahoma Emergency Management or the Department of Public
+Safety. They therefore do not match the NWS warnings one for one: on 14 March
+2025 there were 37 warnings and 29 WEAs, and WEAs went to Chickasha and Velma
+where no warning was issued. The refresh leaves NWS messages out of the query,
+which is what makes reading the archive feasible.
+
+**Which WEAs are about wildfire.** A WEA is an Actual IPAWS message carrying
+phone text. It is a wildfire WEA when its event is Fire Warning, or when its
+phone text says wildfire ("wild land fire" and a misspelled "Wildfir" both
+occur). Of 332 Oklahoma WEAs, 90 qualify. Five others mention fire and were
+read and excluded - two missing-person alerts, a gas-leak structure fire and
+its all-clear, and a hazmat evacuation near Jennings sent while a wildfire
+burned a few miles east - each recorded with its reason in
+`reference/wea_not_wildfire.csv`. Any new WEA that mentions fire without
+qualifying stops the build until it is read and added, or the rule widened.
+The Jennings alert is the judgment call most worth revisiting.
+
+**A WEA ends when it expires or is cancelled.** 17 of the 90 were cancelled
+early by a later message naming them in its references, and the map ends them
+there. The archive records what was sent, not which phones received it.
+
 ## Data format
 
-`03_build_map_data.R` writes one binary chunk per past year and per month of
+`04_build_map_data.R` writes one binary chunk per past year and per month of
 the current year, so a daily refresh rewrites a small file and browsers keep
 the rest cached. Each file name carries a content hash, so any file can be
 cached forever. A chunk is columnar, little-endian, 20 bytes per detection:
@@ -197,6 +227,8 @@ darkest on light ones. Sensor colors use three categorical slots, the most
 that stay distinguishable on a map, so MODIS, AVHRR and analyst-added points
 share the third.
 
+WEAs are outlined in aqua (teal on light maps), at least 17 from the violet
+and 8 from every intensity step under simulated color-vision deficiency.
 Fire warnings are outlined in violet, the categorical slot farthest from every
 orange intensity step on both base maps (OKLab distance of 24 or more for
 every vision type checked). Its one close neighbor is the GOES blue in
@@ -211,12 +243,12 @@ lines and every detection still draw.
 
 `.github/workflows/refresh.yml` runs `00_run_pipeline.R` every three hours
 (and on every push to `main` or by hand from the Actions tab) and publishes
-`outputs/05_site/` to GitHub Pages. No computer needs to be on.
+`outputs/07_site/` to GitHub Pages. No computer needs to be on.
 
-The raw archive is not committed. It lives in the Actions cache between runs,
-so a routine run fetches only the last few days from NOAA and finishes in a
-few minutes. If the cache is evicted, the first run rebuilds it from NOAA in
-about 40 minutes and saves it again.
+The raw archives are not committed. Each lives in its own Actions cache entry
+between runs, so a routine run fetches only the last few days and finishes in
+a few minutes. If a cache is evicted, the next run rebuilds that archive: about
+40 minutes for NOAA detections, about 5 for IPAWS.
 
 A failed run publishes nothing, so the live site keeps its last good build,
 and GitHub emails the repository owner. Usual causes: NOAA's server is down
@@ -251,7 +283,7 @@ it.
 
 ## Hosting elsewhere
 
-`outputs/05_site/` is the whole site: plain static files, no server code, so it
+`outputs/07_site/` is the whole site: plain static files, no server code, so it
 can also be copied to ippra.net like the other dashboards.
 
 - `index.html` must be served with `Cache-Control: no-cache`. It is the one
@@ -260,5 +292,5 @@ can also be copied to ippra.net like the other dashboards.
   carry a content hash, so both can be cached as long as a host likes.
 - `data/manifest.json` is fetched with `no-store` and a query string.
 
-`05_build_dashboard.R` builds into `outputs/05_site.next` and swaps it in, so a
-host serving `outputs/05_site` never sees a half-copied site mid-refresh.
+`07_build_dashboard.R` builds into `outputs/07_site.next` and swaps it in, so a
+host serving `outputs/07_site` never sees a half-copied site mid-refresh.

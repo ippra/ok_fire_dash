@@ -23,7 +23,7 @@ import socketserver
 import sys
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                    "outputs", "05_site")
+                    "outputs", "07_site")
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -44,7 +44,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8902
     if not os.path.exists(os.path.join(ROOT, "index.html")):
-        sys.exit("No built site at %s - run 05_build_dashboard.R first." % ROOT)
+        sys.exit("No built site at %s - run 07_build_dashboard.R first." % ROOT)
     handler = functools.partial(Handler, directory=ROOT)
     socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer(("0.0.0.0", port), handler) as httpd:

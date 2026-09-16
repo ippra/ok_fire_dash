@@ -18,9 +18,9 @@ source(here::here("00_paths.R"))
 # Every number the dashboard shows is either in the manifest or counted in the
 # browser from these rows, so the timeline and the map cannot disagree.
 #
-# Writes outputs/03_map_data/, rebuilt from scratch each run.
+# Writes outputs/04_map_data/, rebuilt from scratch each run.
 
-out <- file.path(outputs, "03_map_data")
+out <- file.path(outputs, "04_map_data")
 
 # Archive Coverage -------------------------------------------------------------
 # Checked before reading: a day missing from disk would be drawn as a day

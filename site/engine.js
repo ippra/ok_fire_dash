@@ -4,7 +4,7 @@
 // needs, and draws them with MapLibre. Every count on the page is taken from
 // the same scan of the same rows, so the map, the tiles, the sensor list and
 // the county list always describe the same selection. The timeline is drawn
-// from the manifest's daily series, which 03_build_map_data.R counted from
+// from the manifest's daily series, which 04_build_map_data.R counted from
 // those same rows.
 
 import * as maplibregl from "./assets/vendor/maplibre-gl-6.10.0/maplibre-gl.mjs";
@@ -43,6 +43,9 @@ const PALETTE = {
     // Fire warnings: violet, the categorical slot farthest from every orange
     // intensity step in both modes (OKLab distance 24 or more, all vision types).
     warn: "#9085e9",
+    // Wireless Emergency Alerts: aqua, 17 or more from the violet and 8.6 or
+    // more from every intensity step under simulated color-vision deficiency.
+    wea: "#199e70",
     countyLine: "rgba(255,255,255,0.22)",
     stateLine: "rgba(255,255,255,0.75)",
     hover: "#ffffff",
@@ -54,6 +57,7 @@ const PALETTE = {
     sensor: ["#2a78d6", "#eb6834", "#1baf7a"],
     choro: ["#ff9a5f", "#e7792f", "#c65e0b", "#a04a03", "#7b3600"],
     warn: "#4a3aa7",
+    wea: "#0f7f5a",
     countyLine: "rgba(40,30,20,0.25)",
     stateLine: "rgba(40,30,20,0.8)",
     hover: "#1c1b19",
@@ -131,6 +135,7 @@ const state = {
   playing: false,
   playMinute: null, // minutes since 1970 UTC while playing
   showWarnings: true,
+  showWeas: true,
 };
 
 let manifest = null;
@@ -151,8 +156,10 @@ let heatK = 0.2;
 let countyBins = null;
 let showAllCounties = false;
 let showAllWarnings = false;
-let warningGeo = null; // FeatureCollection from 04_build_warnings.R
+let warningGeo = null; // FeatureCollection from 05_build_warnings.R
 let warningText = null; // full product text, fetched on first request
+let weaGeo = null; // FeatureCollection from 06_build_weas.R
+let showAllWeas = false;
 
 const $ = (id) => document.getElementById(id);
 const nf = new Intl.NumberFormat("en-US");
@@ -228,7 +235,7 @@ const countDays = (a, b) => cumulative[clampDay(b) + 1] - cumulative[clampDay(a)
 
 // Chunks -----------------------------------------------------------------------
 // Each chunk is columnar: typed-array views straight onto the downloaded
-// buffer, laid out as 03_build_map_data.R documents. Names carry a content
+// buffer, laid out as 04_build_map_data.R documents. Names carry a content
 // hash, so a cached chunk is never stale.
 const chunkCache = new Map();
 const chunkReady = new Map();
@@ -329,9 +336,13 @@ function warningsIn(a, b) {
   return warningGeo.features.filter((f) => f.properties.d0 <= b && f.properties.d1 >= a);
 }
 
-async function fetchWarnings(build) {
-  const r = await fetch(`data/warnings.geojson?v=${build}`);
-  if (!r.ok) throw new Error(`warnings.geojson: HTTP ${r.status}`);
+function weasIn(a, b) {
+  return weaGeo.features.filter((f) => f.properties.d0 <= b && f.properties.d1 >= a);
+}
+
+async function fetchWarnings(build, file = "warnings.geojson") {
+  const r = await fetch(`data/${file}?v=${build}`);
+  if (!r.ok) throw new Error(`${file}: HTTP ${r.status}`);
   const fc = await r.json();
   fc.features.forEach((f, i) => { f.id = i; });
   return fc;
@@ -378,6 +389,7 @@ async function update(retried = false) {
   renderFamilies();
   renderCounties();
   renderWarnings();
+  renderWeas();
   renderLegend();
 }
 
@@ -417,6 +429,7 @@ function addOverlays() {
   map.addSource("okf-points", { type: "geojson", data: mapData.points, buffer: 16 });
   map.addSource("okf-heat", { type: "geojson", data: mapData.heat });
   map.addSource("okf-warnings", { type: "geojson", data: warningGeo });
+  map.addSource("okf-weas", { type: "geojson", data: weaGeo });
 
   map.addLayer({
     id: "okf-county-fill", type: "fill", source: "okf-counties",
@@ -448,6 +461,20 @@ function addOverlays() {
     id: "okf-warn-county", type: "line", source: "okf-warnings",
     paint: { "line-color": P.warn, "line-width": 2, "line-dasharray": [2, 1.5] },
   }, before);
+  // WEAs above warnings: their polygons are usually smaller, drawn around one
+  // town or neighborhood inside the warned area.
+  map.addLayer({
+    id: "okf-wea-fill", type: "fill", source: "okf-weas",
+    paint: { "fill-color": P.wea, "fill-opacity": 0.16 },
+  }, before);
+  map.addLayer({
+    id: "okf-wea-line", type: "line", source: "okf-weas",
+    paint: { "line-color": P.wea, "line-width": 2.2 },
+  }, before);
+  map.addLayer({
+    id: "okf-wea-county", type: "line", source: "okf-weas",
+    paint: { "line-color": P.wea, "line-width": 2, "line-dasharray": [2, 1.5] },
+  }, before);
   map.addLayer({
     id: "okf-points", type: "circle", source: "okf-points",
     layout: { "circle-sort-key": ["match", ["get", "c"], NOT_MEASURED, -1, ["get", "c"]] },
@@ -467,19 +494,21 @@ function addOverlays() {
 }
 
 const WARNING_LAYERS = ["okf-warn-fill", "okf-warn-line", "okf-warn-county"];
+const WEA_LAYERS = ["okf-wea-fill", "okf-wea-line", "okf-wea-county"];
 
-// Which warnings the map draws: those in force during the selected dates, or at
-// the clock during playback.
+// Which warnings and WEAs the map draws: those in force during the selected
+// dates, or at the clock during playback.
 function applyWarningFilter() {
   if (!styleReady) return;
   const when = state.playing
     ? ["all", ["<=", ["get", "t0"], state.playMinute], [">=", ["get", "t1"], state.playMinute]]
     : ["all", ["<=", ["get", "d0"], state.end], [">=", ["get", "d1"], state.start]];
-  map.setFilter("okf-warn-fill", when);
-  map.setFilter("okf-warn-line", ["all", when, ["==", ["get", "polygon"], true]]);
-  map.setFilter("okf-warn-county", ["all", when, ["==", ["get", "polygon"], false]]);
-  for (const id of WARNING_LAYERS) {
-    map.setLayoutProperty(id, "visibility", state.showWarnings ? "visible" : "none");
+  const layers = [["okf-warn", WARNING_LAYERS, state.showWarnings], ["okf-wea", WEA_LAYERS, state.showWeas]];
+  for (const [prefix, ids, on] of layers) {
+    map.setFilter(`${prefix}-fill`, when);
+    map.setFilter(`${prefix}-line`, ["all", when, ["==", ["get", "polygon"], true]]);
+    map.setFilter(`${prefix}-county`, ["all", when, ["==", ["get", "polygon"], false]]);
+    for (const id of ids) map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
   }
 }
 
@@ -545,6 +574,9 @@ function restyleOverlays() {
   map.setPaintProperty("okf-warn-fill", "fill-color", P.warn);
   map.setPaintProperty("okf-warn-line", "line-color", P.warn);
   map.setPaintProperty("okf-warn-county", "line-color", P.warn);
+  map.setPaintProperty("okf-wea-fill", "fill-color", P.wea);
+  map.setPaintProperty("okf-wea-line", "line-color", P.wea);
+  map.setPaintProperty("okf-wea-county", "line-color", P.wea);
 }
 
 function setVisibility() {
@@ -679,10 +711,11 @@ map.on("click", (e) => {
     const ids = [...new Set(map.queryRenderedFeatures(box, { layers: ["okf-points"] }).map((f) => f.id))];
     if (ids.length) { showDetections(ids, e.lngLat); return; }
   }
-  // A click that finds no detection opens the warnings under it, newest first.
-  if (state.showWarnings) {
-    const hits = [...new Set(map.queryRenderedFeatures(e.point, { layers: ["okf-warn-fill"] }).map((f) => f.id))];
-    if (hits.length) { showWarnings(hits, e.lngLat); return; }
+  // A click that finds no detection opens the WEAs and warnings under it.
+  const alerts = alertsAt(e.point);
+  if (alerts.weas.length || alerts.warnings.length) {
+    showAlerts(alerts, e.lngLat);
+    return;
   }
   if (v === "counties") {
     const f = map.queryRenderedFeatures(e.point, { layers: ["okf-county-fill"] })[0];
@@ -696,11 +729,11 @@ map.on("mousemove", (e) => {
   if (v === "points") {
     const pad = 6;
     const hit = map.queryRenderedFeatures([[e.point.x - pad, e.point.y - pad], [e.point.x + pad, e.point.y + pad]], { layers: ["okf-points"] });
-    const warn = state.showWarnings && !state.playing && map.queryRenderedFeatures(e.point, { layers: ["okf-warn-fill"] }).length;
-    map.getCanvas().style.cursor = hit.length || warn ? "pointer" : "";
+    const alerts = !state.playing && alertsAt(e.point);
+    map.getCanvas().style.cursor = hit.length || (alerts && alerts.any) ? "pointer" : "";
   } else {
-    const warn = state.showWarnings && !state.playing && map.queryRenderedFeatures(e.point, { layers: ["okf-warn-fill"] }).length;
-    map.getCanvas().style.cursor = warn ? "pointer" : "";
+    const alerts = !state.playing && alertsAt(e.point);
+    map.getCanvas().style.cursor = alerts && alerts.any ? "pointer" : "";
   }
   if (v !== "counties" || !current) { clearHover(); return; }
   const f = map.queryRenderedFeatures(e.point, { layers: ["okf-county-fill", "okf-county-line"] })[0];
@@ -778,12 +811,48 @@ const fmtWarnTime = (minute) => fmtLocal(minute * 60000, {
   month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short",
 });
 
-function showWarnings(ids, lngLat) {
-  const features = ids.map((i) => warningGeo.features[i]).sort((x, y) => y.properties.t0 - x.properties.t0);
+function alertsAt(point) {
+  const ids = (layer, on) => (on && styleReady
+    ? [...new Set(map.queryRenderedFeatures(point, { layers: [layer] }).map((f) => f.id))]
+    : []);
+  const weas = ids("okf-wea-fill", state.showWeas);
+  const warnings = ids("okf-warn-fill", state.showWarnings);
+  return { weas, warnings, any: weas.length + warnings.length > 0 };
+}
+
+// WEAs first, then warnings, each newest first. A spot can sit under several
+// of each on a bad day, so the popup scrolls rather than truncating.
+function showAlerts({ weas, warnings }, lngLat) {
+  const newest = (geo, ids) => ids.map((i) => geo.features[i]).sort((x, y) => y.properties.t0 - x.properties.t0);
   const el = document.createElement("div");
-  for (const f of features.slice(0, 4)) el.appendChild(warningCard(f));
-  if (features.length > 4) line(el, "pop-more", `and ${features.length - 4} more here`);
+  for (const f of newest(weaGeo, weas)) el.appendChild(weaCard(f));
+  for (const f of newest(warningGeo, warnings)) el.appendChild(warningCard(f));
   popup.setLngLat(lngLat).setDOMContent(el).addTo(map);
+}
+
+function weaCard(f) {
+  const w = f.properties;
+  const item = document.createElement("div");
+  item.className = "pop-item";
+  line(item, "pop-wea", "\u{1F4F1} Wireless Emergency Alert");
+  line(item, "pop-when", `${fmtWarnTime(w.t0)} until ${fmtLocal(w.t1 * 60000, { hour: "numeric", minute: "2-digit", timeZoneName: "short" })}`);
+  if (w.ended === "cancelled") line(item, "pop-meta", `Cancelled early; set to run until ${fmtLocal(w.t_expires * 60000, { hour: "numeric", minute: "2-digit" })}`);
+  if (w.ended === "updated") line(item, "pop-meta", "Replaced by an updated alert");
+  line(item, "pop-phone", w.phone);
+  line(item, "pop-meta", `${w.event} · ${w.county_names} ${w.counties.includes(",") ? "counties" : "County"}`);
+  line(item, "pop-meta", `Sent through ${w.sender_name}`);
+  if (!w.polygon) line(item, "pop-meta", "No polygon sent: shown as the whole county.");
+  if (w.long && w.long !== w.phone) {
+    const more = document.createElement("details");
+    const sum = document.createElement("summary");
+    sum.textContent = "Longer message";
+    const body = document.createElement("div");
+    body.className = "pop-summary";
+    body.textContent = w.long;
+    more.append(sum, body);
+    item.appendChild(more);
+  }
+  return item;
 }
 
 function warningCard(f) {
@@ -842,12 +911,12 @@ function warningBounds(f) {
   return [[x0, y0], [x1, y1]];
 }
 
-function zoomToWarning(f) {
+function zoomToWarning(f, card = warningCard) {
   const b = warningBounds(f);
   map.fitBounds(b, { padding: { top: 80, bottom: 200, left: 60, right: 60 }, maxZoom: 11 });
   map.once("moveend", () => {
     popup.setLngLat([(b[0][0] + b[1][0]) / 2, (b[0][1] + b[1][1]) / 2])
-      .setDOMContent(warningCard(f)).addTo(map);
+      .setDOMContent(card(f)).addTo(map);
   });
 }
 
@@ -891,7 +960,7 @@ let firstStyleLoaded = false;
 map.on("style.load", () => {
   firstStyleLoaded = true;
   currentStyleLoaded = true;
-  if (!manifest || !countyGeo || !warningGeo) return;
+  if (!manifest || !countyGeo || !warningGeo || !weaGeo) return;
   addOverlays();
   if (current) renderMap();
 });
@@ -906,7 +975,7 @@ const tl = { canvas: $("timeline"), drag: null, hover: null, colors: null, layou
 function readColors() {
   const s = getComputedStyle(document.documentElement);
   const v = (n) => s.getPropertyValue(n).trim();
-  tl.colors = { bar: v("--bar"), out: v("--bar-out"), grid: v("--grid"), muted: v("--muted"), text: v("--text"), accent: v("--accent"), warn: v("--warn") };
+  tl.colors = { bar: v("--bar"), out: v("--bar-out"), grid: v("--grid"), muted: v("--muted"), text: v("--text"), accent: v("--accent"), warn: v("--warn"), wea: v("--wea") };
 }
 
 function timelineDomain() {
@@ -941,7 +1010,7 @@ function drawTimeline() {
 
   const [d0, d1] = timelineDomain();
   const span = d1 - d0 + 1;
-  const L = 38, R = 8, T = 8, B = 18;
+  const L = 38, R = 8, T = 12, B = 18;
   const pw = W - L - R, ph = H - T - B;
   const binDays = [1, 2, 7, 14, 28, 56, 91].find((k) => (pw / span) * k >= 2.5) || 91;
   const x = (d) => L + ((d - d0) / span) * pw;
@@ -1012,16 +1081,18 @@ function drawTimeline() {
   ctx.fillRect(sx0 - 1, T, 2, ph);
   ctx.fillRect(sx1 - 1, T, 2, ph);
 
-  // Fire warnings, as violet ticks along the top edge: one per warning, at the
-  // day it was issued.
-  if (state.showWarnings) {
-    ctx.fillStyle = C.warn;
-    for (const f of warningGeo.features) {
+  // Warnings and WEAs as ticks along the top edge, one per alert at the day it
+  // was issued: warnings in the upper row, WEAs in the lower.
+  const alertTicks = (geo, color, top) => {
+    ctx.fillStyle = color;
+    for (const f of geo.features) {
       const d = f.properties.d0;
       if (d < d0 || d > d1) continue;
-      ctx.fillRect(Math.round(x(d + 0.5)) - 1, T - 6, 2, 6);
+      ctx.fillRect(Math.round(x(d + 0.5)) - 1, top, 2, 5);
     }
-  }
+  };
+  if (state.showWarnings) alertTicks(warningGeo, C.warn, 1);
+  if (state.showWeas) alertTicks(weaGeo, C.wea, 6);
 
   // Play head
   if (state.playing) {
@@ -1154,6 +1225,8 @@ function showTimelineTip(px, py) {
   if (binDays === 1 && truncatedDays.has(d)) tip.append(" · NOAA file cut off");
   const nWarn = state.showWarnings ? warningGeo.features.filter((f) => f.properties.d0 >= s && f.properties.d0 <= e).length : 0;
   if (nWarn) tip.append(` · ${nWarn} fire warning${nWarn === 1 ? "" : "s"}`);
+  const nWea = state.showWeas ? weaGeo.features.filter((f) => f.properties.d0 >= s && f.properties.d0 <= e).length : 0;
+  if (nWea) tip.append(` · ${nWea} WEA${nWea === 1 ? "" : "s"}`);
   tip.hidden = false;
   const W = tl.canvas.clientWidth;
   const tw = tip.offsetWidth;
@@ -1245,6 +1318,18 @@ function buildControls() {
     writeHash();
     if (!state.showWarnings) popup.remove();
   });
+  $("show-weas").addEventListener("change", (e) => {
+    state.showWeas = e.target.checked;
+    applyWarningFilter();
+    drawTimeline();
+    renderLegend();
+    writeHash();
+    if (!state.showWeas) popup.remove();
+  });
+  $("wea-more").addEventListener("click", () => {
+    showAllWeas = !showAllWeas;
+    renderWeas();
+  });
   $("warning-more").addEventListener("click", () => {
     showAllWarnings = !showAllWarnings;
     renderWarnings();
@@ -1321,6 +1406,7 @@ function syncControls() {
   for (const b of $("zoom-seg").children) b.setAttribute("aria-checked", String(b.dataset.zoom === state.zoom));
   $("min-frp").value = String(state.minFrp);
   $("show-warnings").checked = state.showWarnings;
+  $("show-weas").checked = state.showWeas;
   syncBasemapButtons();
 }
 
@@ -1471,8 +1557,8 @@ function renderTiles() {
   } else {
     tile(box, "Not measured", "Most intense detection", null);
   }
-  const nWarnings = warningsIn(sel.a, sel.b).length;
-  tile(box, nf.format(nWarnings), "Fire warnings", nWarnings ? "issued by the NWS · see the list below" : "issued by the NWS", null);
+  tile(box, nf.format(warningsIn(sel.a, sel.b).length), "NWS fire warnings", "in force in this period", null);
+  tile(box, nf.format(weasIn(sel.a, sel.b).length), "Wildfire WEAs", "sent to phones in this period", null);
 
   const notes = [];
   if (sel.b === manifest.latest_day && Date.now() - Date.parse(manifest.data_through) < 36 * 3600000) notes.push("The latest day is still coming in: NOAA adds detections through the day.");
@@ -1610,6 +1696,40 @@ function renderWarnings() {
   more.textContent = showAllWarnings ? "Show the latest 8" : `Show all ${rows.length}`;
 }
 
+function renderWeas() {
+  const list = $("wea-list");
+  list.textContent = "";
+  const rows = weasIn(current.a, current.b).sort((x, y) => y.properties.t0 - x.properties.t0);
+  if (!rows.length) {
+    const li = document.createElement("li");
+    li.className = "empty";
+    li.textContent = "No wildfire WEAs in this period.";
+    list.appendChild(li);
+  }
+  for (const f of showAllWeas ? rows : rows.slice(0, 8)) {
+    const w = f.properties;
+    const li = document.createElement("li");
+    const b = document.createElement("button");
+    b.type = "button";
+    const when = document.createElement("span");
+    when.className = "when";
+    when.textContent = fmtWarnTime(w.t0);
+    const what = document.createElement("span");
+    what.className = "where";
+    what.textContent = w.phone;
+    b.append(when, what);
+    b.addEventListener("click", () => {
+      if (!state.showWeas) { state.showWeas = true; syncControls(); applyWarningFilter(); drawTimeline(); writeHash(); }
+      zoomToWarning(f, weaCard);
+    });
+    li.appendChild(b);
+    list.appendChild(li);
+  }
+  const more = $("wea-more");
+  more.hidden = rows.length <= 8;
+  more.textContent = showAllWeas ? "Show the latest 8" : `Show all ${rows.length}`;
+}
+
 function renderLegend() {
   const box = $("legend");
   box.textContent = "";
@@ -1691,13 +1811,28 @@ function renderLegend() {
     sw.className = "swatch warn-swatch";
     sw.style.borderColor = P.warn;
     const l = document.createElement("span");
-    l.textContent = "Fire warning area (dashed: whole county)";
+    l.textContent = "NWS fire warning area";
     const n = document.createElement("span");
     n.className = "n";
     n.textContent = nf.format(warningsIn(sel.a, sel.b).length);
     r.append(sw, l, n);
     box.appendChild(r);
   }
+  if (state.showWeas) {
+    const r = document.createElement("div");
+    r.className = "row";
+    const sw = document.createElement("span");
+    sw.className = "swatch warn-swatch";
+    sw.style.borderColor = P.wea;
+    const l = document.createElement("span");
+    l.textContent = "Wildfire WEA area";
+    const n = document.createElement("span");
+    n.className = "n";
+    n.textContent = nf.format(weasIn(sel.a, sel.b).length);
+    r.append(sw, l, n);
+    box.appendChild(r);
+  }
+  if (state.showWarnings || state.showWeas) line(box, "note", "A dashed outline is a whole county, for an alert sent without a polygon.");
 }
 
 // Sharing ----------------------------------------------------------------------
@@ -1714,6 +1849,7 @@ function writeHash() {
   if (state.families.size !== famIds.length) p.set("s", famIds.filter((f) => state.families.has(f)).join("."));
   if (state.zoom !== "year") p.set("t", state.zoom);
   if (!state.showWarnings) p.set("w", "0");
+  if (!state.showWeas) p.set("a", "0");
   const c = map.getCenter();
   p.set("map", `${map.getZoom().toFixed(2)}/${c.lat.toFixed(3)}/${c.lng.toFixed(3)}`);
   history.replaceState(null, "", "#" + p.toString());
@@ -1740,6 +1876,7 @@ function readHash() {
   }
   if (["all", "year", "fit"].includes(p.get("t"))) state.zoom = p.get("t");
   if (p.get("w") === "0") state.showWarnings = false;
+  if (p.get("a") === "0") state.showWeas = false;
   const m = (p.get("map") || "").split("/").map(Number);
   if (m.length === 3 && m.every(Number.isFinite)) map.jumpTo({ zoom: m[0], center: [m[2], m[1]] });
 }
@@ -1842,8 +1979,12 @@ async function checkForUpdate({ quiet = false } = {}) {
     const newData = m.total !== manifest.total || m.data_through !== manifest.data_through;
     try {
       warningGeo = await fetchWarnings(m.build);
+      weaGeo = await fetchWarnings(m.build, "weas.geojson");
       warningText = null;
-      if (styleReady) map.getSource("okf-warnings").setData(warningGeo);
+      if (styleReady) {
+        map.getSource("okf-warnings").setData(warningGeo);
+        map.getSource("okf-weas").setData(weaGeo);
+      }
     } catch { /* keep the warnings already loaded */ }
     applyManifest(m);
     if (followLatest) applyPreset(state.preset);
@@ -1874,6 +2015,7 @@ function renderAbout() {
     (m.unavailable_days.length ? ` NOAA published no file for ${m.unavailable_days.length} day${m.unavailable_days.length === 1 ? "" : "s"}; they are marked beneath the timeline.` : "") +
     ((m.truncated_days || []).length ? ` NOAA's file for ${m.truncated_days.length} day${m.truncated_days.length === 1 ? "" : "s"} (${m.truncated_days.join(", ")}) ends partway through a record, so ${m.truncated_days.length === 1 ? "it is" : "they are"} incomplete.` : ""));
   p(`<strong>Fire warnings</strong> are the National Weather Service's Fire Warnings for Oklahoma, issued at the request of local officials or Oklahoma Forestry Services when a wildfire threatens people and evacuations are needed. The violet outline is the warning's own polygon; a dashed outline marks an older warning issued for whole counties without one. ${nf.format(warningGeo.features.length)} warnings since ${fmtDay(0, { month: "long" })}, from the <a href="https://mesonet.agron.iastate.edu/wx/afos/list.phtml">Iowa Environmental Mesonet</a> archive.`);
+  p(`<strong>Wildfire WEAs</strong> are the Wireless Emergency Alerts sent to phones in Oklahoma about a wildfire, from any sender, taken from FEMA's <a href="https://www.fema.gov/openfema-data-page/ipaws-archived-alerts">IPAWS archive</a>. An alert counts when its event is Fire Warning or its phone text says wildfire; the few that mention fire otherwise were read by hand. In Oklahoma these come from state and local emergency management, not the National Weather Service, so they do not match the NWS warnings one for one. The aqua outline is the area the sender drew. An alert shows until it expired, or until it was cancelled. The archive records what was sent, not which phones received it. ${nf.format(weaGeo.features.length)} wildfire WEAs since ${fmtDay(0, { month: "long" })}.`);
   p(`<strong>Updates.</strong> The data are refreshed from NOAA automatically, and this page checks for new detections every 10 minutes while it is open.`);
   p(`Built by the <a href="https://ippra.net">Institute for Public Policy Research and Analysis</a> at the University of Oklahoma.`);
 }
@@ -1883,16 +2025,18 @@ async function boot() {
   readColors();
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { readColors(); drawTimeline(); });
 
-  const [m, counties, warnings] = await Promise.all([
+  const [m, counties, warnings, weas] = await Promise.all([
     fetchManifest(),
     fetch("data/counties.geojson").then((r) => {
       if (!r.ok) throw new Error(`counties.geojson: HTTP ${r.status}`);
       return r.json();
     }),
     fetchWarnings(window.OKF_BUILD),
+    fetchWarnings(window.OKF_BUILD, "weas.geojson"),
   ]);
   countyGeo = counties;
   warningGeo = warnings;
+  weaGeo = weas;
   applyManifest(m);
   buildControls();
   readHash();

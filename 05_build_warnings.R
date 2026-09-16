@@ -17,11 +17,11 @@ source(here::here("00_paths.R"))
 # counties its UGC line names. The polygon is in the text itself, so IEM's
 # separate shapefile archive, which starts in 2022, is not needed.
 #
-# Writes outputs/04_warnings/. Run after 03, whose simplified county outlines
+# Writes outputs/05_warnings/. Run after 04, whose simplified county outlines
 # it reuses so warning edges sit on the county lines the map draws.
 
-out <- file.path(outputs, "04_warnings")
-map_data <- file.path(outputs, "03_map_data")
+out <- file.path(outputs, "05_warnings")
+map_data <- file.path(outputs, "04_map_data")
 
 files <- list.files(warnings_dir, pattern = "\\.txt$", full.names = TRUE)
 if (length(files) == 0) {
@@ -29,7 +29,7 @@ if (length(files) == 0) {
 }
 
 if (!file.exists(file.path(map_data, "counties.geojson"))) {
-  stop("No county outlines - run 03_build_map_data.R first.")
+  stop("No county outlines - run 04_build_map_data.R first.")
 }
 
 # Offices that issue for Oklahoma. Declared, so a warning from any other office

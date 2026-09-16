@@ -45,8 +45,28 @@ lookback_days <- 5
 warnings_dir <- file.path(data_dir, "frw_text")
 frw_url <- "https://mesonet.agron.iastate.edu/cgi-bin/afos/retrieve.py"
 
+# Wireless Emergency Alerts and every other message sent through FEMA's IPAWS,
+# June 2012 on, published a day late on OpenFEMA:
+# https://www.fema.gov/openfema-data-page/ipaws-archived-alerts
+# The archive keeps each Oklahoma message whole, as the CAP XML FEMA holds, so
+# 06 can reclassify without downloading again. The first refresh reads about
+# 80,000 messages nationwide, 1.8 GB; later ones read the last few days.
+weas_dir <- file.path(data_dir, "ipaws")
+weas_index <- file.path(weas_dir, "index.csv")
+ipaws_url <- "https://www.fema.gov/api/open/v1/IpawsArchivedAlerts"
+
+# FEMA publishes a message 24 hours after it is sent, so each refresh re-reads
+# this many days behind the newest message on disk.
+ipaws_lookback_days <- 3
+
+# The National Weather Service sends 98% of IPAWS messages - 4.8 million - and
+# none of them is a Fire Warning or a wildfire evacuation: NWS does not send
+# Fire Warnings as WEAs. In Oklahoma those come from state and local senders.
+# Leaving NWS out of the query is what makes the refresh feasible.
+nws_sender <- "w-nws.webmaster@noaa.gov"
+
 # Oklahoma's extent is -103.00 to -94.43 and 33.62 to 37.00. The crop keeps a
-# margin so no border detection is lost before 03 clips to the state itself.
+# margin so no border detection is lost before 04 clips to the state itself.
 crop_box <- c(xmin = -103.1, xmax = -94.3, ymin = 33.5, ymax = 37.1)
 
 # Detections are dated by the Oklahoma calendar day they occurred on. NOAA's
@@ -65,6 +85,10 @@ undatable_reference <- file.path(reference_dir, "undatable_rows.csv")
 # February 2026 still use the old numbers. No number is reused.
 # https://www.weather.gov/gis/ZoneCounty
 zone_county_reference <- file.path(reference_dir, "ok_zone_county.csv")
+
+# Oklahoma WEAs that mention fire but are not about a wildfire, each read and
+# decided by hand. 06 stops on any fire-mentioning WEA it cannot classify.
+wea_review_reference <- file.path(reference_dir, "wea_not_wildfire.csv")
 
 # Counties come from the Census cartographic boundary file, 2023 vintage, via
 # tigris::counties(cb = TRUE). Cached here so a build needs no network.

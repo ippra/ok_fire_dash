@@ -1,6 +1,6 @@
 # reference/
 
-Small hand-maintained tables the build reads. `03_build_map_data.R` stops if
+Small hand-maintained tables the build reads. `04_build_map_data.R` stops if
 NOAA uses a satellite or method name that is not listed here, so a new name is
 added on purpose rather than guessed.
 
@@ -10,6 +10,7 @@ added on purpose rather than guessed.
 | `methods.csv` | NOAA's raw `Method` values and the sensor family each belongs to | read off the HMS daily text files, 2015-2026; algorithm notes from https://www.ospo.noaa.gov/Products/land/hms.html |
 | `undatable_rows.csv` | NOAA files holding rows whose `YearDay` is not a date, with the count expected in each; those rows are dropped, and any other unparseable row stops the build | found by the build's own guard, 2026-09-16 |
 | `ok_zone_county.csv` | Oklahoma's public forecast zones and the county each covers, for Fire Warnings that name zones; `vintages` says which NWS file lists the zone | NWS zone-county correlation files `bp18mr25.dbx` and `bp16ap26.dbx`, https://www.weather.gov/gis/ZoneCounty, Oklahoma rows combined; built 2026-09-16 |
+| `wea_not_wildfire.csv` | Oklahoma WEAs that mention fire but are not about a wildfire, each read and decided by hand, with the reason | read from the IPAWS messages, 2026-09-16 |
 | `ok_counties_2023.geojson` | Oklahoma's 77 counties, full resolution, used to assign each detection its county | Census cartographic boundary file, 2023, via `tigris::counties(state = "OK", cb = TRUE, year = 2023)` |
 
 `MetOp-02` is kept as NOAA wrote it rather than mapped to MetOp-A or MetOp-B:

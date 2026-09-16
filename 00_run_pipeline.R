@@ -7,9 +7,11 @@
 scripts <- c(
   "01_refresh_data.R",
   "02_refresh_warnings.R",
-  "03_build_map_data.R",
-  "04_build_warnings.R",
-  "05_build_dashboard.R"
+  "03_refresh_weas.R",
+  "04_build_map_data.R",
+  "05_build_warnings.R",
+  "06_build_weas.R",
+  "07_build_dashboard.R"
 )
 
 for (script in scripts) {
