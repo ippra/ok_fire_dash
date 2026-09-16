@@ -1,0 +1,86 @@
+ugc,cwa,zone_name,county,fips,vintages
+OKZ001,AMA,Cimarron,Cimarron,40025,bp16ap26 bp18mr25
+OKZ002,AMA,Texas,Texas,40139,bp16ap26 bp18mr25
+OKZ003,AMA,Beaver,Beaver,40007,bp16ap26 bp18mr25
+OKZ004,OUN,Harper,Harper,40059,bp16ap26 bp18mr25
+OKZ005,OUN,Woods,Woods,40151,bp16ap26 bp18mr25
+OKZ006,OUN,Alfalfa,Alfalfa,40003,bp16ap26 bp18mr25
+OKZ007,OUN,Grant,Grant,40053,bp16ap26 bp18mr25
+OKZ008,OUN,Kay,Kay,40071,bp16ap26 bp18mr25
+OKZ009,OUN,Ellis,Ellis,40045,bp16ap26 bp18mr25
+OKZ010,OUN,Woodward,Woodward,40153,bp16ap26 bp18mr25
+OKZ011,OUN,Major,Major,40093,bp16ap26 bp18mr25
+OKZ012,OUN,Garfield,Garfield,40047,bp16ap26 bp18mr25
+OKZ013,OUN,Noble,Noble,40103,bp16ap26 bp18mr25
+OKZ014,OUN,Roger Mills,Roger Mills,40129,bp16ap26 bp18mr25
+OKZ015,OUN,Dewey,Dewey,40043,bp16ap26 bp18mr25
+OKZ016,OUN,Custer,Custer,40039,bp16ap26 bp18mr25
+OKZ017,OUN,Blaine,Blaine,40011,bp16ap26 bp18mr25
+OKZ018,OUN,Kingfisher,Kingfisher,40073,bp16ap26 bp18mr25
+OKZ019,OUN,Logan,Logan,40083,bp16ap26 bp18mr25
+OKZ020,OUN,Payne,Payne,40119,bp16ap26 bp18mr25
+OKZ021,OUN,Beckham,Beckham,40009,bp16ap26 bp18mr25
+OKZ022,OUN,Washita,Washita,40149,bp16ap26 bp18mr25
+OKZ023,OUN,Caddo,Caddo,40015,bp16ap26 bp18mr25
+OKZ024,OUN,Canadian,Canadian,40017,bp16ap26 bp18mr25
+OKZ025,OUN,Oklahoma,Oklahoma,40109,bp16ap26 bp18mr25
+OKZ026,OUN,Lincoln,Lincoln,40081,bp16ap26 bp18mr25
+OKZ027,OUN,Grady,Grady,40051,bp16ap26 bp18mr25
+OKZ028,OUN,McClain,McClain,40087,bp16ap26 bp18mr25
+OKZ029,OUN,Cleveland,Cleveland,40027,bp16ap26 bp18mr25
+OKZ030,OUN,Pottawatomie,Pottawatomie,40125,bp16ap26 bp18mr25
+OKZ031,OUN,Seminole,Seminole,40133,bp16ap26 bp18mr25
+OKZ032,OUN,Hughes,Hughes,40063,bp16ap26 bp18mr25
+OKZ033,OUN,Harmon,Harmon,40057,bp16ap26 bp18mr25
+OKZ034,OUN,Greer,Greer,40055,bp16ap26 bp18mr25
+OKZ035,OUN,Kiowa,Kiowa,40075,bp16ap26 bp18mr25
+OKZ036,OUN,Jackson,Jackson,40065,bp16ap26 bp18mr25
+OKZ037,OUN,Tillman,Tillman,40141,bp16ap26 bp18mr25
+OKZ038,OUN,Comanche,Comanche,40031,bp16ap26 bp18mr25
+OKZ039,OUN,Stephens,Stephens,40137,bp16ap26 bp18mr25
+OKZ040,OUN,Garvin,Garvin,40049,bp16ap26 bp18mr25
+OKZ041,OUN,Murray,Murray,40099,bp16ap26 bp18mr25
+OKZ042,OUN,Pontotoc,Pontotoc,40123,bp16ap26 bp18mr25
+OKZ043,OUN,Coal,Coal,40029,bp16ap26 bp18mr25
+OKZ044,OUN,Cotton,Cotton,40033,bp16ap26 bp18mr25
+OKZ045,OUN,Jefferson,Jefferson,40067,bp16ap26 bp18mr25
+OKZ046,OUN,Carter,Carter,40019,bp16ap26 bp18mr25
+OKZ047,OUN,Johnston,Johnston,40069,bp16ap26 bp18mr25
+OKZ048,OUN,Atoka,Atoka,40005,bp16ap26 bp18mr25
+OKZ049,TSA,Pushmataha,Pushmataha,40127,bp16ap26 bp18mr25
+OKZ050,OUN,Love,Love,40085,bp16ap26 bp18mr25
+OKZ051,OUN,Marshall,Marshall,40095,bp16ap26 bp18mr25
+OKZ052,OUN,Bryan,Bryan,40013,bp16ap26 bp18mr25
+OKZ053,TSA,Choctaw,Choctaw,40023,bp16ap26 bp18mr25
+OKZ054,TSA,Osage,Osage,40113,bp18mr25
+OKZ055,TSA,Washington,Washington,40147,bp16ap26 bp18mr25
+OKZ056,TSA,Nowata,Nowata,40105,bp16ap26 bp18mr25
+OKZ057,TSA,Craig,Craig,40035,bp16ap26 bp18mr25
+OKZ058,TSA,Ottawa,Ottawa,40115,bp16ap26 bp18mr25
+OKZ059,TSA,Pawnee,Pawnee,40117,bp16ap26 bp18mr25
+OKZ060,TSA,Tulsa,Tulsa,40143,bp16ap26 bp18mr25
+OKZ061,TSA,Rogers,Rogers,40131,bp16ap26 bp18mr25
+OKZ062,TSA,Mayes,Mayes,40097,bp16ap26 bp18mr25
+OKZ063,TSA,Delaware,Delaware,40041,bp16ap26 bp18mr25
+OKZ064,TSA,Creek,Creek,40037,bp16ap26 bp18mr25
+OKZ065,TSA,Okfuskee,Okfuskee,40107,bp16ap26 bp18mr25
+OKZ066,TSA,Okmulgee,Okmulgee,40111,bp16ap26 bp18mr25
+OKZ067,TSA,Wagoner,Wagoner,40145,bp16ap26 bp18mr25
+OKZ068,TSA,Cherokee,Cherokee,40021,bp16ap26 bp18mr25
+OKZ069,TSA,Adair,Adair,40001,bp16ap26 bp18mr25
+OKZ070,TSA,Muskogee,Muskogee,40101,bp16ap26 bp18mr25
+OKZ071,TSA,McIntosh,McIntosh,40091,bp16ap26 bp18mr25
+OKZ072,TSA,Sequoyah,Sequoyah,40135,bp18mr25
+OKZ073,TSA,Pittsburg,Pittsburg,40121,bp16ap26 bp18mr25
+OKZ074,TSA,Haskell,Haskell,40061,bp16ap26 bp18mr25
+OKZ075,TSA,Latimer,Latimer,40077,bp16ap26 bp18mr25
+OKZ076,TSA,Le Flore,Le Flore,40079,bp18mr25
+OKZ077,SHV,McCurtain,McCurtain,40089,bp16ap26 bp18mr25
+OKZ154,TSA,Western Osage,Osage,40113,bp16ap26
+OKZ172,TSA,Northern Sequoyah,Sequoyah,40135,bp16ap26
+OKZ176,TSA,Northern Le Flore,Le Flore,40079,bp16ap26
+OKZ254,TSA,Northeast Osage,Osage,40113,bp16ap26
+OKZ272,TSA,Central and Southern Sequoyah,Sequoyah,40135,bp16ap26
+OKZ276,TSA,Central Le Flore,Le Flore,40079,bp16ap26
+OKZ354,TSA,Southeast Osage,Osage,40113,bp16ap26
+OKZ376,TSA,Southern Le Flore,Le Flore,40079,bp16ap26

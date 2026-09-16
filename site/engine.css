@@ -23,6 +23,7 @@
   --bar: #c65e0b;
   --bar-out: #c9c6bd;
   --grid: #e8e6e0;
+  --warn: #4a3aa7;
   --radius: 10px;
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-display: Charter, "Bitstream Charter", Cambria, Georgia, serif;
@@ -50,6 +51,7 @@
     --bar: #ee8545;
     --bar-out: #4a4945;
     --grid: #2c2c2a;
+    --warn: #9085e9;
     color-scheme: dark;
   }
 }
@@ -212,6 +214,7 @@ html[data-entry="referred"] .ippra-bar-back { display: inline; }
   padding: 9px 11px;
   min-width: 0;
 }
+.tile:last-child:nth-child(odd) { grid-column: 1 / -1; }
 .tile .v { font-size: 21px; font-weight: 650; line-height: 1.15; overflow-wrap: anywhere; }
 .tile .k { font-size: 12px; color: var(--text-2); margin-top: 2px; }
 .tile .s { font-size: 11.5px; color: var(--muted); margin-top: 1px; }
@@ -289,6 +292,29 @@ html[data-entry="referred"] .ippra-bar-back { display: inline; }
 .county-list .bar { grid-column: 1 / 3; height: 4px; border-radius: 2px; background: var(--grid); overflow: hidden; }
 .county-list .bar span { display: block; height: 100%; background: var(--bar); border-radius: 2px; }
 .county-list .empty { color: var(--muted); font-size: 13px; padding: 4px 6px; }
+
+.toggle { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 8px; cursor: pointer; }
+.toggle input { margin: 0; accent-color: var(--warn); }
+.warning-list { list-style: none; margin: 0; padding: 0; }
+.warning-list li button {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: none;
+  border: 0;
+  border-left: 3px solid var(--warn);
+  padding: 5px 8px;
+  margin: 3px 0;
+  border-radius: 0 6px 6px 0;
+  cursor: pointer;
+  text-align: left;
+}
+.warning-list li button:hover { background: var(--hover); }
+.warning-list .when { font-weight: 600; font-size: 13px; }
+.warning-list .where { font-size: 12px; color: var(--text-2); }
+.warning-list .empty { color: var(--muted); font-size: 13px; padding: 4px 0; }
+.legend .warn-swatch { background: transparent !important; border: 2px solid; }
 
 .actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
@@ -401,6 +427,11 @@ html[data-entry="referred"] .ippra-bar-back { display: inline; }
 .pop-frp { font-size: 15px; font-weight: 650; }
 .pop-meta { color: var(--text-2); }
 .pop-more { color: var(--muted); margin-top: 6px; font-size: 12px; }
+.pop-warn { color: var(--warn); font-weight: 700; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }
+.pop-summary { margin-top: 5px; }
+.pop-links { display: flex; gap: 14px; align-items: baseline; margin-top: 4px; }
+.pop-links a { color: var(--accent); font-size: 13px; }
+.pop-text { white-space: pre-wrap; font: 11.5px/1.35 ui-monospace, Menlo, monospace; margin: 6px 0 0; max-height: 220px; overflow-y: auto; }
 .maplibregl-ctrl-bottom-right { margin-bottom: 150px; }
 @media (max-width: 820px) { .maplibregl-ctrl-bottom-right { margin-bottom: 128px; } }
 .maplibregl-ctrl-bottom-left { display: none; }

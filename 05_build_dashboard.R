@@ -4,18 +4,28 @@ library(jsonlite)
 source(here::here("00_paths.R"))
 
 # Dashboard Assembly -----------------------------------------------------------
-# Copies the hand-edited front end in site/ and 02's map data into one static
-# directory. Computes nothing: every detection and count is 02's.
+# Copies the hand-edited front end in site/, 03's map data and 04's warnings
+# into one static directory. Computes nothing: every detection and count is
+# 03's, every warning 04's.
 #
-# Writes outputs/03_site/ - plain static files, no server code. Preview:
+# Writes outputs/05_site/ - plain static files, no server code. Preview:
 #   python3 preview.py
 
-data_in <- file.path(outputs, "02_map_data")
-out <- file.path(outputs, "03_site")
+data_in <- file.path(outputs, "03_map_data")
+warnings_in <- file.path(outputs, "04_warnings")
+out <- file.path(outputs, "05_site")
 
 manifest_path <- file.path(data_in, "manifest.json")
 if (!file.exists(manifest_path)) {
-  stop("No map data - run 02_build_map_data.R first.")
+  stop("No map data - run 03_build_map_data.R first.")
+}
+
+warning_files <- file.path(
+  warnings_in,
+  c("warnings.geojson", "warning_text.json")
+)
+if (!all(file.exists(warning_files))) {
+  stop("No warnings - run 04_build_warnings.R first.")
 }
 
 manifest <- read_json(manifest_path)
@@ -33,7 +43,7 @@ if (length(missing_chunks) > 0) {
 
 # Assemble ---------------------------------------------------------------------
 # Built beside the live directory and swapped in at the end, so a host serving
-# outputs/03_site during a scheduled refresh never sees a half-copied site.
+# outputs/05_site during a scheduled refresh never sees a half-copied site.
 staging <- paste0(out, ".next")
 unlink(staging, recursive = TRUE)
 dir.create(staging, recursive = TRUE)
@@ -46,14 +56,14 @@ invisible(file.copy(
 
 dir.create(file.path(staging, "data"))
 invisible(file.copy(
-  list.files(data_in, full.names = TRUE),
+  c(list.files(data_in, full.names = TRUE), warning_files),
   file.path(staging, "data")
 ))
 
 # Every stamped asset URL changes with the data build, so a host may cache
 # engine.js and engine.css indefinitely. index.html cannot stamp itself and
 # must be served with Cache-Control: no-cache; manifest.json is fetched with a
-# query string and no-store.
+# query string and no-store, and the warning files with the build stamp.
 for (file in c("index.html", "engine.js", "engine.css")) {
   path <- file.path(staging, file)
   read_file(path) |>

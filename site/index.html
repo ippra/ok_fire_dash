@@ -153,6 +153,13 @@ window.addEventListener("load", function () { setTimeout(function () {
       <div class="legend" id="legend" aria-live="polite"></div>
     </section>
 
+    <section class="block" aria-labelledby="h-warnings">
+      <h2 id="h-warnings">Fire warnings</h2>
+      <label class="toggle"><input type="checkbox" id="show-warnings" checked> Show fire warnings on the map</label>
+      <ol class="warning-list" id="warning-list"></ol>
+      <button type="button" class="link-btn" id="warning-more" hidden></button>
+    </section>
+
     <section class="block" aria-labelledby="h-sensors">
       <h2 id="h-sensors">Sensors</h2>
       <div id="families" class="families"></div>

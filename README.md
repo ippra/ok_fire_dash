@@ -1,8 +1,9 @@
 # ok_fire_dash - Oklahoma Fire Detections
 
 A static site that maps every satellite fire detection in Oklahoma since
-2015 from NOAA's Hazard Mapping System (HMS), for any range of dates, and
-updates itself as NOAA publishes new detections.
+2015 from NOAA's Hazard Mapping System (HMS), and every National Weather
+Service Fire Warning issued for Oklahoma, for any range of dates, and updates
+itself as new data are published.
 
 It replaces `NOAA FIRE DATA/ok_fire_map/fire_map.R`, which baked the whole
 archive into a 280 MB htmlwidget and could show one day at a time. This site
@@ -22,6 +23,11 @@ loads only the dates you ask for, so a first visit downloads about 2 MB.
   sensor; a heat map of density; and counties shaded by detections per 100
   square miles.
 - **Four base maps:** dark, light, streets and satellite imagery.
+- **Fire warnings.** NWS Fire Warnings in force during the selected dates are
+  outlined in violet - the warning's own polygon, or a dashed whole-county
+  outline for older warnings issued without one. A panel lists them, a tile
+  counts them, the timeline marks each one, and clicking one gives the time,
+  counties, requesting agency, the NWS summary and the full text.
 - **Filters** by sensor (GOES, VIIRS, MODIS, AVHRR, analyst-added) and minimum
   intensity. Every number on the page follows the filters.
 - **Summary** of the period: detections, days with detections, the busiest
@@ -42,29 +48,35 @@ against the project root, so nothing is machine-specific.
 
 | step | what it is |
 |---|---|
-| `00_run_pipeline.R` | runs 01-03; the entry point for a scheduled update |
+| `00_run_pipeline.R` | runs 01-05; the entry point for a scheduled update |
 | `01_refresh_data.R` | tops up `data/hms_text/` from NOAA's daily text files. **Incremental**: fetches days not on disk plus the last 5, which NOAA is still revising. Downloads run one at a time: NOAA's server stalled every parallel transfer R attempted |
-| `02_build_map_data.R` | clips to Oklahoma, assigns county and local day, writes binary detection chunks, the manifest and county outlines → `outputs/02_map_data/` |
-| `03_build_dashboard.R` | copies `site/` and the map data into one static directory → `outputs/03_site/` |
+| `02_refresh_warnings.R` | re-pulls every NWS Fire Warning since 2015 from the Iowa Environmental Mesonet into `data/frw_text/`: about 430 KB, under a second, so no incremental state |
+| `03_build_map_data.R` | clips to Oklahoma, assigns county and local day, writes binary detection chunks, the manifest and county outlines → `outputs/03_map_data/` |
+| `04_build_warnings.R` | keeps Oklahoma's warnings, parses their areas, polygons, expiry and summary → `outputs/04_warnings/` |
+| `05_build_dashboard.R` | copies `site/`, the map data and the warnings into one static directory → `outputs/05_site/` |
 
 ```
-NOAA HMS daily text files           satepsanone.nesdis.noaa.gov
-        │
-01_refresh_data.R                   cold start ~40 min, routine refresh seconds
-        │
-data/hms_text/YYYY/hms_fireYYYYMMDD.csv     one per NOAA file, Oklahoma box
-        │
-        │   reference/satellites.csv, methods.csv, ok_counties_2023.geojson
-        ▼
-02_build_map_data.R                 about 15 seconds
-        │
-outputs/02_map_data/                manifest.json, fires_*.bin, counties
-        │
-        │   site/ (front end source)
-        ▼
-03_build_dashboard.R                seconds
-        │
-outputs/03_site/                    the deployable site
+NOAA HMS daily text files           IEM Fire Warning text archive
+        │                                   │
+01_refresh_data.R                   02_refresh_warnings.R
+        │   cold start ~40 min,             │   full pull, under a second
+        │   routine refresh seconds         │
+data/hms_text/                      data/frw_text/
+        │                                   │
+        │   reference/ satellites,          │   reference/ok_zone_county.csv
+        │   methods, counties               │
+        ▼                                   │
+03_build_map_data.R  ─── counties ────────► 04_build_warnings.R
+        │   about 15 seconds                │   seconds
+        ▼                                   ▼
+outputs/03_map_data/                outputs/04_warnings/
+        │                                   │
+        └──────────────┬────────────────────┘
+                       │   site/ (front end source)
+                       ▼
+             05_build_dashboard.R           seconds
+                       │
+             outputs/05_site/               the deployable site
 ```
 
 ## Building and previewing
@@ -81,7 +93,9 @@ Every script stops loudly instead of producing a quietly wrong site: a NOAA
 file that reads short, a day missing from the archive, a satellite or method
 name not in `reference/`, a negative intensity that is not NOAA's -999 code, a
 county join that changes the row count, a chunk the manifest lists but the disk
-lacks, and R or CSV files in the published directory all halt the build. A
+lacks, a warning whose UGC line, expiry or polygon does not parse or whose zone
+resolves to no county, and R or CSV files in the published directory all halt
+the build. A
 failed run leaves the last good site in place.
 
 ## Decisions worth knowing
@@ -127,9 +141,29 @@ size.
 **Individual points up to 150,000.** Above that the map switches to the heat
 map and says so; the GeoJSON hand-off to MapLibre takes seconds beyond it.
 
+**Fire Warnings come from their own text.** Every Oklahoma warning since 2022,
+and some from 2017 and 2019, carries a `LAT...LON` polygon in the product, 134
+of the 159 since 2015. That is more than IEM's separate warning shapefiles
+hold (they start in 2022), so the build parses the text and needs no
+shapefile. The other 25 are drawn as the counties their UGC line names.
+
+**Zone numbers change.** Between the NWS zone-county files of March 2025 and
+April 2026, NWS Tulsa split the Osage, Sequoyah and Le Flore zones (054, 072,
+076) into 154/254/354, 172/272 and 176/276/376, and warnings up to February
+2026 still use the old numbers. `reference/ok_zone_county.csv` combines both
+files; no number was reused. Because a reused number would silently move an
+old warning, the build checks each zone-coded warning against its evidence: a
+polygon must overlap one of its counties, and a warning without one must name
+one in its text.
+
+**A warning belongs to a day it was in force.** A warning appears for any
+selected date between the Oklahoma day it was issued and the day it expired,
+so an evening warning running past midnight shows on both days. During
+playback the map shows only the warnings in force at the clock.
+
 ## Data format
 
-`02_build_map_data.R` writes one binary chunk per past year and per month of
+`03_build_map_data.R` writes one binary chunk per past year and per month of
 the current year, so a daily refresh rewrites a small file and browsers keep
 the rest cached. Each file name carries a content hash, so any file can be
 cached forever. A chunk is columnar, little-endian, 20 bytes per detection:
@@ -160,6 +194,12 @@ darkest on light ones. Sensor colors use three categorical slots, the most
 that stay distinguishable on a map, so MODIS, AVHRR and analyst-added points
 share the third.
 
+Fire warnings are outlined in violet, the categorical slot farthest from every
+orange intensity step on both base maps (OKLab distance of 24 or more for
+every vision type checked). Its one close neighbor is the GOES blue in
+"color by sensor" mode, where the shapes differ: warnings are outlines,
+detections are dots.
+
 The only third-party requests are base map tiles: CARTO for the vector maps
 and labels, Esri for satellite imagery. If they fail, the county and state
 lines and every detection still draw.
@@ -168,7 +208,7 @@ lines and every detection still draw.
 
 `.github/workflows/refresh.yml` runs `00_run_pipeline.R` every three hours
 (and on every push to `main` or by hand from the Actions tab) and publishes
-`outputs/03_site/` to GitHub Pages. No computer needs to be on.
+`outputs/05_site/` to GitHub Pages. No computer needs to be on.
 
 The raw archive is not committed. It lives in the Actions cache between runs,
 so a routine run fetches only the last few days from NOAA and finishes in a
@@ -208,7 +248,7 @@ it.
 
 ## Hosting elsewhere
 
-`outputs/03_site/` is the whole site: plain static files, no server code, so it
+`outputs/05_site/` is the whole site: plain static files, no server code, so it
 can also be copied to ippra.net like the other dashboards.
 
 - `index.html` must be served with `Cache-Control: no-cache`. It is the one
@@ -217,5 +257,5 @@ can also be copied to ippra.net like the other dashboards.
   carry a content hash, so both can be cached as long as a host likes.
 - `data/manifest.json` is fetched with `no-store` and a query string.
 
-`03_build_dashboard.R` builds into `outputs/03_site.next` and swaps it in, so a
-host serving `outputs/03_site` never sees a half-copied site mid-refresh.
+`05_build_dashboard.R` builds into `outputs/05_site.next` and swaps it in, so a
+host serving `outputs/05_site` never sees a half-copied site mid-refresh.

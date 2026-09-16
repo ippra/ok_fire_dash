@@ -73,7 +73,7 @@ jobs:
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: outputs/03_site
+          path: outputs/05_site
 
   deploy:
     needs: build

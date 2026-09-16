@@ -4,7 +4,7 @@
 // needs, and draws them with MapLibre. Every count on the page is taken from
 // the same scan of the same rows, so the map, the tiles, the sensor list and
 // the county list always describe the same selection. The timeline is drawn
-// from the manifest's daily series, which 02_build_map_data.R counted from
+// from the manifest's daily series, which 03_build_map_data.R counted from
 // those same rows.
 
 import * as maplibregl from "./assets/vendor/maplibre-gl-6.10.0/maplibre-gl.mjs";
@@ -37,6 +37,9 @@ const PALETTE = {
     ring: "#0e0e0e",
     sensor: ["#3987e5", "#d95926", "#199e70"],
     choro: ["#a54c01", "#cb6620", "#ee8545", "#feaf82", "#ffddca"],
+    // Fire warnings: violet, the categorical slot farthest from every orange
+    // intensity step in both modes (OKLab distance 24 or more, all vision types).
+    warn: "#9085e9",
     countyLine: "rgba(255,255,255,0.22)",
     stateLine: "rgba(255,255,255,0.75)",
     hover: "#ffffff",
@@ -47,6 +50,7 @@ const PALETTE = {
     ring: "#fafaf8",
     sensor: ["#2a78d6", "#eb6834", "#1baf7a"],
     choro: ["#ff9a5f", "#e7792f", "#c65e0b", "#a04a03", "#7b3600"],
+    warn: "#4a3aa7",
     countyLine: "rgba(40,30,20,0.25)",
     stateLine: "rgba(40,30,20,0.8)",
     hover: "#1c1b19",
@@ -123,6 +127,7 @@ const state = {
   zoom: "year",
   playing: false,
   playMinute: null, // minutes since 1970 UTC while playing
+  showWarnings: true,
 };
 
 let manifest = null;
@@ -142,6 +147,9 @@ let heatRef = 1;
 let heatK = 0.2;
 let countyBins = null;
 let showAllCounties = false;
+let showAllWarnings = false;
+let warningGeo = null; // FeatureCollection from 04_build_warnings.R
+let warningText = null; // full product text, fetched on first request
 
 const $ = (id) => document.getElementById(id);
 const nf = new Intl.NumberFormat("en-US");
@@ -217,7 +225,7 @@ const countDays = (a, b) => cumulative[clampDay(b) + 1] - cumulative[clampDay(a)
 
 // Chunks -----------------------------------------------------------------------
 // Each chunk is columnar: typed-array views straight onto the downloaded
-// buffer, laid out as 02_build_map_data.R documents. Names carry a content
+// buffer, laid out as 03_build_map_data.R documents. Names carry a content
 // hash, so a cached chunk is never stale.
 const chunkCache = new Map();
 const chunkReady = new Map();
@@ -312,6 +320,20 @@ function activeRange() {
   return [state.start, state.end];
 }
 
+// Warnings in force on any day of a range: issued on or before its last day
+// and expiring on or after its first. Days are Oklahoma days, as for detections.
+function warningsIn(a, b) {
+  return warningGeo.features.filter((f) => f.properties.d0 <= b && f.properties.d1 >= a);
+}
+
+async function fetchWarnings(build) {
+  const r = await fetch(`data/warnings.geojson?v=${build}`);
+  if (!r.ok) throw new Error(`warnings.geojson: HTTP ${r.status}`);
+  const fc = await r.json();
+  fc.features.forEach((f, i) => { f.id = i; });
+  return fc;
+}
+
 // Update -----------------------------------------------------------------------
 let token = 0;
 async function update(retried = false) {
@@ -352,6 +374,7 @@ async function update(retried = false) {
   renderTiles();
   renderFamilies();
   renderCounties();
+  renderWarnings();
   renderLegend();
 }
 
@@ -390,6 +413,7 @@ function addOverlays() {
   map.addSource("okf-state", { type: "geojson", data: "data/state.geojson" });
   map.addSource("okf-points", { type: "geojson", data: mapData.points, buffer: 16 });
   map.addSource("okf-heat", { type: "geojson", data: mapData.heat });
+  map.addSource("okf-warnings", { type: "geojson", data: warningGeo });
 
   map.addLayer({
     id: "okf-county-fill", type: "fill", source: "okf-counties",
@@ -407,6 +431,20 @@ function addOverlays() {
     id: "okf-state-line", type: "line", source: "okf-state",
     paint: { "line-color": P.stateLine, "line-width": 1.6 },
   }, before);
+  // Warnings sit under the detections so a fire inside a warning stays visible.
+  // A warning drawn from whole counties, with no polygon of its own, is dashed.
+  map.addLayer({
+    id: "okf-warn-fill", type: "fill", source: "okf-warnings",
+    paint: { "fill-color": P.warn, "fill-opacity": 0.14 },
+  }, before);
+  map.addLayer({
+    id: "okf-warn-line", type: "line", source: "okf-warnings",
+    paint: { "line-color": P.warn, "line-width": 2.2 },
+  }, before);
+  map.addLayer({
+    id: "okf-warn-county", type: "line", source: "okf-warnings",
+    paint: { "line-color": P.warn, "line-width": 2, "line-dasharray": [2, 1.5] },
+  }, before);
   map.addLayer({
     id: "okf-points", type: "circle", source: "okf-points",
     layout: { "circle-sort-key": ["match", ["get", "c"], NOT_MEASURED, -1, ["get", "c"]] },
@@ -422,6 +460,24 @@ function addOverlays() {
   styleReady = true;
   applyCountyState();
   setVisibility();
+  applyWarningFilter();
+}
+
+const WARNING_LAYERS = ["okf-warn-fill", "okf-warn-line", "okf-warn-county"];
+
+// Which warnings the map draws: those in force during the selected dates, or at
+// the clock during playback.
+function applyWarningFilter() {
+  if (!styleReady) return;
+  const when = state.playing
+    ? ["all", ["<=", ["get", "t0"], state.playMinute], [">=", ["get", "t1"], state.playMinute]]
+    : ["all", ["<=", ["get", "d0"], state.end], [">=", ["get", "d1"], state.start]];
+  map.setFilter("okf-warn-fill", when);
+  map.setFilter("okf-warn-line", ["all", when, ["==", ["get", "polygon"], true]]);
+  map.setFilter("okf-warn-county", ["all", when, ["==", ["get", "polygon"], false]]);
+  for (const id of WARNING_LAYERS) {
+    map.setLayoutProperty(id, "visibility", state.showWarnings ? "visible" : "none");
+  }
 }
 
 function pointPaint(P) {
@@ -482,6 +538,9 @@ function restyleOverlays() {
   map.setPaintProperty("okf-county-line", "line-color", P.countyLine);
   map.setPaintProperty("okf-state-line", "line-color", P.stateLine);
   map.setPaintProperty("okf-county-hover", "line-color", P.hover);
+  map.setPaintProperty("okf-warn-fill", "fill-color", P.warn);
+  map.setPaintProperty("okf-warn-line", "line-color", P.warn);
+  map.setPaintProperty("okf-warn-county", "line-color", P.warn);
 }
 
 function setVisibility() {
@@ -527,6 +586,7 @@ function renderMap() {
   map.setPaintProperty("okf-heat", "heatmap-intensity", heatPaint(PALETTE[tone()])["heatmap-intensity"]);
   applyCountyState();
   setVisibility();
+  applyWarningFilter();
   popup.remove();
 }
 
@@ -613,9 +673,14 @@ map.on("click", (e) => {
     const pad = 8;
     const box = [[e.point.x - pad, e.point.y - pad], [e.point.x + pad, e.point.y + pad]];
     const ids = [...new Set(map.queryRenderedFeatures(box, { layers: ["okf-points"] }).map((f) => f.id))];
-    if (!ids.length) return;
-    showDetections(ids, e.lngLat);
-  } else if (v === "counties") {
+    if (ids.length) { showDetections(ids, e.lngLat); return; }
+  }
+  // A click that finds no detection opens the warnings under it, newest first.
+  if (state.showWarnings) {
+    const hits = [...new Set(map.queryRenderedFeatures(e.point, { layers: ["okf-warn-fill"] }).map((f) => f.id))];
+    if (hits.length) { showWarnings(hits, e.lngLat); return; }
+  }
+  if (v === "counties") {
     const f = map.queryRenderedFeatures(e.point, { layers: ["okf-county-fill"] })[0];
     if (f) zoomToCounty(f.id);
   }
@@ -627,9 +692,11 @@ map.on("mousemove", (e) => {
   if (v === "points") {
     const pad = 6;
     const hit = map.queryRenderedFeatures([[e.point.x - pad, e.point.y - pad], [e.point.x + pad, e.point.y + pad]], { layers: ["okf-points"] });
-    map.getCanvas().style.cursor = hit.length ? "pointer" : "";
+    const warn = state.showWarnings && !state.playing && map.queryRenderedFeatures(e.point, { layers: ["okf-warn-fill"] }).length;
+    map.getCanvas().style.cursor = hit.length || warn ? "pointer" : "";
   } else {
-    map.getCanvas().style.cursor = "";
+    const warn = state.showWarnings && !state.playing && map.queryRenderedFeatures(e.point, { layers: ["okf-warn-fill"] }).length;
+    map.getCanvas().style.cursor = warn ? "pointer" : "";
   }
   if (v !== "counties" || !current) { clearHover(); return; }
   const f = map.queryRenderedFeatures(e.point, { layers: ["okf-county-fill", "okf-county-line"] })[0];
@@ -703,6 +770,83 @@ function zoomToCounty(id) {
   map.fitBounds([[b[0], b[1]], [b[2], b[3]]], { padding: { top: 60, bottom: 180, left: 40, right: 40 }, maxZoom: 11 });
 }
 
+const fmtWarnTime = (minute) => fmtLocal(minute * 60000, {
+  month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short",
+});
+
+function showWarnings(ids, lngLat) {
+  const features = ids.map((i) => warningGeo.features[i]).sort((x, y) => y.properties.t0 - x.properties.t0);
+  const el = document.createElement("div");
+  for (const f of features.slice(0, 4)) el.appendChild(warningCard(f));
+  if (features.length > 4) line(el, "pop-more", `and ${features.length - 4} more here`);
+  popup.setLngLat(lngLat).setDOMContent(el).addTo(map);
+}
+
+function warningCard(f) {
+  const w = f.properties;
+  const item = document.createElement("div");
+  item.className = "pop-item";
+  const head = line(item, "pop-warn", "\u26A0 Fire Warning");
+  head.setAttribute("aria-label", "Fire Warning");
+  line(item, "pop-when", `${fmtWarnTime(w.t0)} until ${fmtLocal(w.t1 * 60000, { hour: "numeric", minute: "2-digit", timeZoneName: "short" })}`);
+  line(item, "pop-meta", `${w.county_names} ${w.counties.includes(",") ? "counties" : "County"} · ${w.office_name}`);
+  if (w.requested_by) line(item, "pop-meta", `Requested by ${w.requested_by}`);
+  if (!w.polygon) line(item, "pop-meta", "No polygon issued: shown as the whole county.");
+  line(item, "pop-summary", w.summary);
+  const links = document.createElement("div");
+  links.className = "pop-links";
+  const more = document.createElement("button");
+  more.type = "button";
+  more.className = "link-btn";
+  more.textContent = "Full text";
+  more.addEventListener("click", async () => {
+    more.disabled = true;
+    try {
+      if (!warningText) {
+        const r = await fetch(`data/warning_text.json?v=${manifest.build}`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        warningText = await r.json();
+      }
+      const pre = document.createElement("pre");
+      pre.className = "pop-text";
+      pre.textContent = (warningText[w.id] || "").trim();
+      links.replaceWith(pre);
+    } catch (err) {
+      more.disabled = false;
+      toast("Could not load the warning text: " + err.message);
+    }
+  });
+  const iem = document.createElement("a");
+  iem.href = w.url;
+  iem.target = "_blank";
+  iem.rel = "noopener";
+  iem.textContent = "Original at IEM";
+  links.append(more, iem);
+  item.appendChild(links);
+  return item;
+}
+
+function warningBounds(f) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  const walk = (c) => {
+    if (typeof c[0] === "number") {
+      x0 = Math.min(x0, c[0]); x1 = Math.max(x1, c[0]);
+      y0 = Math.min(y0, c[1]); y1 = Math.max(y1, c[1]);
+    } else c.forEach(walk);
+  };
+  walk(f.geometry.coordinates);
+  return [[x0, y0], [x1, y1]];
+}
+
+function zoomToWarning(f) {
+  const b = warningBounds(f);
+  map.fitBounds(b, { padding: { top: 80, bottom: 200, left: 60, right: 60 }, maxZoom: 11 });
+  map.once("moveend", () => {
+    popup.setLngLat([(b[0][0] + b[1][0]) / 2, (b[0][1] + b[1][1]) / 2])
+      .setDOMContent(warningCard(f)).addTo(map);
+  });
+}
+
 map.on("moveend", () => writeHash());
 
 // Base Maps --------------------------------------------------------------------
@@ -743,7 +887,7 @@ let firstStyleLoaded = false;
 map.on("style.load", () => {
   firstStyleLoaded = true;
   currentStyleLoaded = true;
-  if (!manifest || !countyGeo) return;
+  if (!manifest || !countyGeo || !warningGeo) return;
   addOverlays();
   if (current) renderMap();
 });
@@ -758,7 +902,7 @@ const tl = { canvas: $("timeline"), drag: null, hover: null, colors: null, layou
 function readColors() {
   const s = getComputedStyle(document.documentElement);
   const v = (n) => s.getPropertyValue(n).trim();
-  tl.colors = { bar: v("--bar"), out: v("--bar-out"), grid: v("--grid"), muted: v("--muted"), text: v("--text"), accent: v("--accent") };
+  tl.colors = { bar: v("--bar"), out: v("--bar-out"), grid: v("--grid"), muted: v("--muted"), text: v("--text"), accent: v("--accent"), warn: v("--warn") };
 }
 
 function timelineDomain() {
@@ -863,6 +1007,17 @@ function drawTimeline() {
   ctx.fillStyle = C.accent;
   ctx.fillRect(sx0 - 1, T, 2, ph);
   ctx.fillRect(sx1 - 1, T, 2, ph);
+
+  // Fire warnings, as violet ticks along the top edge: one per warning, at the
+  // day it was issued.
+  if (state.showWarnings) {
+    ctx.fillStyle = C.warn;
+    for (const f of warningGeo.features) {
+      const d = f.properties.d0;
+      if (d < d0 || d > d1) continue;
+      ctx.fillRect(Math.round(x(d + 0.5)) - 1, T - 6, 2, 6);
+    }
+  }
 
   // Play head
   if (state.playing) {
@@ -993,6 +1148,8 @@ function showTimelineTip(px, py) {
   tip.append(b, ` detection${n === 1 ? "" : "s"} · ${fmtRange(s, e)}`);
   if (binDays === 1 && unavailableDays.has(d)) tip.append(" · no NOAA file");
   if (binDays === 1 && truncatedDays.has(d)) tip.append(" · NOAA file cut off");
+  const nWarn = state.showWarnings ? warningGeo.features.filter((f) => f.properties.d0 >= s && f.properties.d0 <= e).length : 0;
+  if (nWarn) tip.append(` · ${nWarn} fire warning${nWarn === 1 ? "" : "s"}`);
   tip.hidden = false;
   const W = tl.canvas.clientWidth;
   const tw = tip.offsetWidth;
@@ -1076,6 +1233,19 @@ function buildControls() {
     $("basemaps").appendChild(b);
   }
 
+  $("show-warnings").addEventListener("change", (e) => {
+    state.showWarnings = e.target.checked;
+    applyWarningFilter();
+    drawTimeline();
+    renderLegend();
+    writeHash();
+    if (!state.showWarnings) popup.remove();
+  });
+  $("warning-more").addEventListener("click", () => {
+    showAllWarnings = !showAllWarnings;
+    renderWarnings();
+  });
+
   $("county-more").addEventListener("click", () => {
     showAllCounties = !showAllCounties;
     $("county-more").setAttribute("aria-expanded", String(showAllCounties));
@@ -1146,6 +1316,7 @@ function syncControls() {
   }
   for (const b of $("zoom-seg").children) b.setAttribute("aria-checked", String(b.dataset.zoom === state.zoom));
   $("min-frp").value = String(state.minFrp);
+  $("show-warnings").checked = state.showWarnings;
   syncBasemapButtons();
 }
 
@@ -1237,6 +1408,7 @@ function renderPlayFrame() {
   }
   play.shown = features.length;
   if (styleReady) map.getSource("okf-points").setData({ type: "FeatureCollection", features });
+  applyWarningFilter();
 }
 
 function stopPlay(redraw = false) {
@@ -1295,6 +1467,8 @@ function renderTiles() {
   } else {
     tile(box, "Not measured", "Most intense detection", null);
   }
+  const nWarnings = warningsIn(sel.a, sel.b).length;
+  tile(box, nf.format(nWarnings), "Fire warnings", nWarnings ? "issued by the NWS · see the list below" : "issued by the NWS", null);
 
   const notes = [];
   if (sel.b === manifest.latest_day && Date.now() - Date.parse(manifest.data_through) < 36 * 3600000) notes.push("The latest day is still coming in: NOAA adds detections through the day.");
@@ -1398,6 +1572,40 @@ function renderCounties() {
   $("county-more").textContent = showAllCounties ? "Show top 10" : `Show all ${manifest.counties.length} counties`;
 }
 
+function renderWarnings() {
+  const list = $("warning-list");
+  list.textContent = "";
+  const rows = warningsIn(current.a, current.b).sort((x, y) => y.properties.t0 - x.properties.t0);
+  if (!rows.length) {
+    const li = document.createElement("li");
+    li.className = "empty";
+    li.textContent = "No fire warnings in this period.";
+    list.appendChild(li);
+  }
+  for (const f of showAllWarnings ? rows : rows.slice(0, 8)) {
+    const w = f.properties;
+    const li = document.createElement("li");
+    const b = document.createElement("button");
+    b.type = "button";
+    const when = document.createElement("span");
+    when.className = "when";
+    when.textContent = fmtWarnTime(w.t0);
+    const where = document.createElement("span");
+    where.className = "where";
+    where.textContent = `${w.county_names}${w.requested_by ? " · " + w.requested_by : ""}`;
+    b.append(when, where);
+    b.addEventListener("click", () => {
+      if (!state.showWarnings) { state.showWarnings = true; syncControls(); applyWarningFilter(); drawTimeline(); writeHash(); }
+      zoomToWarning(f);
+    });
+    li.appendChild(b);
+    list.appendChild(li);
+  }
+  const more = $("warning-more");
+  more.hidden = rows.length <= 8;
+  more.textContent = showAllWarnings ? "Show the latest 8" : `Show all ${rows.length}`;
+}
+
 function renderLegend() {
   const box = $("legend");
   box.textContent = "";
@@ -1471,6 +1679,21 @@ function renderLegend() {
     if (zero) row("transparent", "No detections", zero, "swatch");
     line(box, "note", "Counts are counties. Hover a county for its total.");
   }
+
+  if (state.showWarnings) {
+    const r = document.createElement("div");
+    r.className = "row";
+    const sw = document.createElement("span");
+    sw.className = "swatch warn-swatch";
+    sw.style.borderColor = P.warn;
+    const l = document.createElement("span");
+    l.textContent = "Fire warning area (dashed: whole county)";
+    const n = document.createElement("span");
+    n.className = "n";
+    n.textContent = nf.format(warningsIn(sel.a, sel.b).length);
+    r.append(sw, l, n);
+    box.appendChild(r);
+  }
 }
 
 // Sharing ----------------------------------------------------------------------
@@ -1486,6 +1709,7 @@ function writeHash() {
   if (state.minFrp) p.set("m", String(state.minFrp));
   if (state.families.size !== famIds.length) p.set("s", famIds.filter((f) => state.families.has(f)).join("."));
   if (state.zoom !== "year") p.set("t", state.zoom);
+  if (!state.showWarnings) p.set("w", "0");
   const c = map.getCenter();
   p.set("map", `${map.getZoom().toFixed(2)}/${c.lat.toFixed(3)}/${c.lng.toFixed(3)}`);
   history.replaceState(null, "", "#" + p.toString());
@@ -1511,6 +1735,7 @@ function readHash() {
     if (s.length) state.families = new Set(s);
   }
   if (["all", "year", "fit"].includes(p.get("t"))) state.zoom = p.get("t");
+  if (p.get("w") === "0") state.showWarnings = false;
   const m = (p.get("map") || "").split("/").map(Number);
   if (m.length === 3 && m.every(Number.isFinite)) map.jumpTo({ zoom: m[0], center: [m[2], m[1]] });
 }
@@ -1611,6 +1836,11 @@ async function checkForUpdate({ quiet = false } = {}) {
     const followLatest = state.preset && !/^y/.test(state.preset);
     const atLatest = state.end === manifest.latest_day;
     const newData = m.total !== manifest.total || m.data_through !== manifest.data_through;
+    try {
+      warningGeo = await fetchWarnings(m.build);
+      warningText = null;
+      if (styleReady) map.getSource("okf-warnings").setData(warningGeo);
+    } catch { /* keep the warnings already loaded */ }
     applyManifest(m);
     if (followLatest) applyPreset(state.preset);
     else if (atLatest && !state.playing) {
@@ -1639,6 +1869,7 @@ function renderAbout() {
   p(`<strong>Coverage.</strong> ${nf.format(m.total)} detections inside Oklahoma from ${fmtDay(0, { month: "long" })} through ${through}.` +
     (m.unavailable_days.length ? ` NOAA published no file for ${m.unavailable_days.length} day${m.unavailable_days.length === 1 ? "" : "s"}; they are marked beneath the timeline.` : "") +
     ((m.truncated_days || []).length ? ` NOAA's file for ${m.truncated_days.length} day${m.truncated_days.length === 1 ? "" : "s"} (${m.truncated_days.join(", ")}) ends partway through a record, so ${m.truncated_days.length === 1 ? "it is" : "they are"} incomplete.` : ""));
+  p(`<strong>Fire warnings</strong> are the National Weather Service's Fire Warnings for Oklahoma, issued at the request of local officials or Oklahoma Forestry Services when a wildfire threatens people and evacuations are needed. The violet outline is the warning's own polygon; a dashed outline marks an older warning issued for whole counties without one. ${nf.format(warningGeo.features.length)} warnings since ${fmtDay(0, { month: "long" })}, from the <a href="https://mesonet.agron.iastate.edu/wx/afos/list.phtml">Iowa Environmental Mesonet</a> archive.`);
   p(`<strong>Updates.</strong> The data are refreshed from NOAA automatically, and this page checks for new detections every 10 minutes while it is open.`);
   p(`Built by the <a href="https://ippra.net">Institute for Public Policy Research and Analysis</a> at the University of Oklahoma.`);
 }
@@ -1648,14 +1879,16 @@ async function boot() {
   readColors();
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { readColors(); drawTimeline(); });
 
-  const [m, counties] = await Promise.all([
+  const [m, counties, warnings] = await Promise.all([
     fetchManifest(),
     fetch("data/counties.geojson").then((r) => {
       if (!r.ok) throw new Error(`counties.geojson: HTTP ${r.status}`);
       return r.json();
     }),
+    fetchWarnings(window.OKF_BUILD),
   ]);
   countyGeo = counties;
+  warningGeo = warnings;
   applyManifest(m);
   buildControls();
   readHash();
