@@ -112,12 +112,13 @@ window.addEventListener("load", function () { setTimeout(function () {
         <button type="button" class="btn icon" id="step-fwd" title="Later period (→)" aria-label="Later period">&#9654;</button>
       </div>
       <div class="play-row">
-        <button type="button" class="btn" id="play" aria-pressed="false"><span class="play-glyph" aria-hidden="true">&#9654;</span> <span class="play-text">Play day by day</span></button>
-        <label class="inline">Speed
-          <select id="play-speed">
-            <option value="900">Slow</option>
-            <option value="450" selected>Normal</option>
-            <option value="150">Fast</option>
+        <button type="button" class="btn" id="play" aria-pressed="false"><span class="play-glyph" aria-hidden="true">&#9654;</span> <span class="play-text">Play minute by minute</span></button>
+        <label class="inline">Step
+          <select id="play-step">
+            <option value="1" selected>1 minute</option>
+            <option value="5">5 minutes</option>
+            <option value="15">15 minutes</option>
+            <option value="60">1 hour</option>
           </select>
         </label>
       </div>

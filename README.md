@@ -15,7 +15,9 @@ loads only the dates you ask for, so a first visit downloads about 2 MB.
   detections across the whole archive that you drag to select. The arrow
   buttons and arrow keys move the range by its own length, so a single day
   steps a day and a week steps a week.
-- **Play day by day** through the selected range.
+- **Play minute by minute** through the selected range: a clock in Central
+  Time advances 1, 5 or 15 minutes or an hour per frame, and the map shows the
+  detections from the hour before it, older ones fading.
 - **Three views.** Individual detections, colored by fire intensity or by
   sensor; a heat map of density; and counties shaded by detections per 100
   square miles.

@@ -16,6 +16,12 @@ const DAY_MS = 86400000;
 // GeoJSON hand-off to the worker takes seconds, so the map draws density.
 const POINT_CAP = 150000;
 const REFRESH_MS = 10 * 60 * 1000;
+// Playback advances a clock through the selected dates and shows what was
+// detected in the trailing hour, older detections fading. A one-minute window
+// would be empty most of the time: GOES scans every few minutes and a polar
+// satellite passes a few times a day.
+const PLAY_TRAIL_MIN = 60;
+const PLAY_FRAME_MS = 80;
 const OK_BOUNDS = [[-103.0, 33.6], [-94.4, 37.0]];
 
 // Palettes ---------------------------------------------------------------------
@@ -116,7 +122,7 @@ const state = {
   families: null, // Set of family ids switched on
   zoom: "year",
   playing: false,
-  playDay: null,
+  playMinute: null, // minutes since 1970 UTC while playing
 };
 
 let manifest = null;
@@ -303,7 +309,7 @@ function select(loaded, a, b) {
 }
 
 function activeRange() {
-  return state.playing ? [state.playDay, state.playDay] : [state.start, state.end];
+  return [state.start, state.end];
 }
 
 // Update -----------------------------------------------------------------------
@@ -367,6 +373,7 @@ map.addControl(new maplibregl.ScaleControl({ unit: "imperial" }), "bottom-right"
 const tone = () => BASEMAPS[state.basemap].tone;
 
 function effectiveView() {
+  if (state.playing) return "points";
   if (state.view === "points" && current && current.total > POINT_CAP) return "heat";
   return state.view;
 }
@@ -424,7 +431,13 @@ function pointPaint(P) {
       ? ["match", ["get", "c"], 0, P.frp[0], 1, P.frp[1], 2, P.frp[2], 3, P.frp[3], P.none]
       : ["match", ["get", "g"], 0, P.sensor[0], 1, P.sensor[1], P.sensor[2]],
     "circle-radius": ["interpolate", ["exponential", 1.5], ["zoom"], 5, radius(1), 9, radius(2), 13, radius(4)],
-    "circle-opacity": ["match", ["get", "c"], NOT_MEASURED, 0.8, 0.95],
+    // `a` is a detection's age within the playback window, 0 to 1; outside
+    // playback it is absent and nothing fades.
+    "circle-opacity": [
+      "*",
+      ["match", ["get", "c"], NOT_MEASURED, 0.8, 0.95],
+      ["-", 1, ["*", 0.8, ["coalesce", ["get", "a"], 0]]],
+    ],
     "circle-stroke-color": P.ring,
     "circle-stroke-width": ["interpolate", ["linear"], ["zoom"], 5, 0.3, 10, 1],
     "circle-stroke-opacity": 0.7,
@@ -594,7 +607,7 @@ const hoverTip = new maplibregl.Popup({ closeButton: false, closeOnClick: false,
 let hoveredCounty = null;
 
 map.on("click", (e) => {
-  if (!styleReady || !current) return;
+  if (!styleReady || !current || state.playing) return;
   const v = effectiveView();
   if (v === "points") {
     const pad = 8;
@@ -853,8 +866,9 @@ function drawTimeline() {
 
   // Play head
   if (state.playing) {
+    const dayFloat = state.start + (state.playMinute - play.startMinute) / 1440;
     ctx.fillStyle = C.text;
-    ctx.fillRect(x(state.playDay + 0.5) - 1, T - 2, 2, ph + 4);
+    ctx.fillRect(x(dayFloat) - 1, T - 2, 2, ph + 4);
   }
 
   // X ticks
@@ -1114,7 +1128,7 @@ function syncDateControls() {
   de.value = iso(state.end);
   const len = state.end - state.start + 1;
   $("range-label").textContent = state.playing
-    ? `${fmtDay(state.playDay, { weekday: "short" })}`
+    ? playClock()
     : `${fmtRange(state.start, state.end)} · ${nf.format(len)} day${len === 1 ? "" : "s"}`;
   $("step-back").disabled = state.start === 0;
   $("step-fwd").disabled = state.end === manifest.latest_day;
@@ -1137,42 +1151,102 @@ function syncControls() {
 
 // Play -------------------------------------------------------------------------
 let playTimer = null;
-async function startPlay() {
-  if (state.start === state.end) {
-    toast("Choose more than one day to play through");
-    return;
+const play = { loaded: [], startMinute: 0, endMinute: 0, shown: 0 };
+
+// The UTC instant of midnight in Oklahoma on day d. Central Time is five or six
+// hours behind UTC depending on daylight saving, so test both.
+function localMidnightMinute(d) {
+  const base = epochMs + d * DAY_MS;
+  const localHour = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "numeric", hourCycle: "h23" });
+  for (const h of [5, 6]) {
+    const ms = base + h * 3600000;
+    const hour = localHour.formatToParts(ms).find((p) => p.type === "hour").value;
+    if (Number(hour) === 0) return ms / 60000;
   }
-  state.playing = true;
-  state.playDay = state.start;
-  $("play").setAttribute("aria-pressed", "true");
-  $("play").querySelector(".play-glyph").textContent = "❚❚";
-  $("play").querySelector(".play-text").textContent = "Pause";
-  $("busy-text").textContent = "the period";
-  $("busy").hidden = false;
-  await Promise.all(chunksFor(state.start, state.end).map(loadChunk)).catch(() => {});
-  $("busy").hidden = true;
-  tick();
+  return base / 60000 + 360;
 }
 
-async function tick() {
+function playClock() {
+  const clock = fmtLocal(state.playMinute * 60000, {
+    weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short",
+  });
+  return `${clock} · ${nf.format(play.shown)} in the last hour`;
+}
+
+async function startPlay() {
+  state.playing = true;
+  $("play").setAttribute("aria-pressed", "true");
+  $("play").querySelector(".play-glyph").textContent = "\u25A0";
+  $("play").querySelector(".play-text").textContent = "Stop";
+  $("busy-text").textContent = "the period";
+  $("busy").hidden = false;
+  try {
+    play.loaded = await Promise.all(chunksFor(state.start, state.end).map(loadChunk));
+  } catch (e) {
+    $("busy").hidden = true;
+    stopPlay(true);
+    toast("Could not load detections: " + e.message, 8000);
+    return;
+  }
+  $("busy").hidden = true;
   if (!state.playing) return;
-  await update();
+  play.startMinute = localMidnightMinute(state.start);
+  play.endMinute = localMidnightMinute(state.end + 1) - 1;
+  state.playMinute = play.startMinute;
+  popup.remove();
+  clearHover();
+  setVisibility();
+  const note = document.createElement("div");
+  note.className = "warn";
+  note.textContent = "Playing: each frame shows detections from the hour before the clock, older ones fading.";
+  $("legend").prepend(note);
+  frame();
+}
+
+function frame() {
   if (!state.playing) return;
+  renderPlayFrame();
+  syncDateControls();
+  drawTimeline();
   playTimer = setTimeout(() => {
     if (!state.playing) return;
-    if (state.playDay >= state.end) { stopPlay(true); return; }
-    state.playDay++;
-    tick();
-  }, Number($("play-speed").value));
+    if (state.playMinute >= play.endMinute) { stopPlay(true); return; }
+    state.playMinute = Math.min(play.endMinute, state.playMinute + Number($("play-step").value));
+    frame();
+  }, PLAY_FRAME_MS);
+}
+
+// Chunks are sorted by time, so the trailing hour is a binary search on the
+// minute column rather than a scan of the whole period.
+function renderPlayFrame() {
+  const t = state.playMinute;
+  const from = t - PLAY_TRAIL_MIN + 1;
+  const famOn = famIds.map((f) => state.families.has(f));
+  const features = [];
+  for (const c of play.loaded) {
+    for (let i = lowerBound(c.minute, c.n, from); i < c.n && c.minute[i] <= t; i++) {
+      if (c.day[i] < state.start || c.day[i] > state.end) continue;
+      const f = c.frp[i];
+      if (!passesFrp(f) || !famOn[srcFamily[c.src[i]]]) continue;
+      features.push({
+        type: "Feature",
+        geometry: { type: "Point", coordinates: [c.lon[i], c.lat[i]] },
+        properties: { c: frpClass(f), g: srcGroup[c.src[i]], a: (t - c.minute[i]) / PLAY_TRAIL_MIN },
+      });
+    }
+  }
+  play.shown = features.length;
+  if (styleReady) map.getSource("okf-points").setData({ type: "FeatureCollection", features });
 }
 
 function stopPlay(redraw = false) {
   if (!state.playing) return;
   state.playing = false;
   clearTimeout(playTimer);
+  play.loaded = [];
   $("play").setAttribute("aria-pressed", "false");
-  $("play").querySelector(".play-glyph").textContent = "▶";
-  $("play").querySelector(".play-text").textContent = "Play day by day";
+  $("play").querySelector(".play-glyph").textContent = "\u25B6";
+  $("play").querySelector(".play-text").textContent = "Play minute by minute";
   if (redraw) update();
 }
 
@@ -1462,7 +1536,10 @@ function savePng() {
     ctx.fillStyle = sub;
     ctx.font = `${13.5 * dpr}px ${getComputedStyle(document.body).fontFamily}`;
     const view = { points: "detections", heat: "density", counties: "detections per 100 sq mi" }[effectiveView()];
-    ctx.fillText(`${fmtRange(a, b)} · ${nf.format(current.total)} satellite detections · map shows ${view}`, 16 * dpr, 50 * dpr);
+    const subtitle = state.playing
+      ? `${playClock()} · map shows detections in the hour before`
+      : `${fmtRange(a, b)} · ${nf.format(current.total)} satellite detections · map shows ${view}`;
+    ctx.fillText(subtitle, 16 * dpr, 50 * dpr);
     ctx.font = `${11 * dpr}px ${getComputedStyle(document.body).fontFamily}`;
     const credit = state.basemap === "satellite" ? "Imagery © Esri · Labels © CARTO, OpenStreetMap" : "Base map © CARTO, OpenStreetMap contributors";
     ctx.fillText(`Data: NOAA Hazard Mapping System · IPPRA, University of Oklahoma · ${credit}`, 16 * dpr, out.height - 9 * dpr);
