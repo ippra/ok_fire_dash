@@ -18,7 +18,10 @@ loads only the dates you ask for, so a first visit downloads about 2 MB.
   steps a day and a week steps a week.
 - **Play minute by minute** through the selected range: a clock in Central
   Time advances 1, 5 or 15 minutes or an hour per frame, and the map shows the
-  detections from the hour before it, older ones fading.
+  detections from the 12 hours before it, older ones fading. Twelve hours,
+  because a detection is a snapshot: GOES scans every 5 minutes but can miss a
+  burning fire for hours, and each VIIRS satellite passes about twice a day.
+  A detection fading out does not mean the fire went out.
 - **Three views.** Individual detections, colored by fire intensity or by
   sensor; a heat map of density; and counties shaded by detections per 100
   square miles.

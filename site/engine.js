@@ -17,10 +17,13 @@ const DAY_MS = 86400000;
 const POINT_CAP = 150000;
 const REFRESH_MS = 10 * 60 * 1000;
 // Playback advances a clock through the selected dates and shows what was
-// detected in the trailing hour, older detections fading. A one-minute window
-// would be empty most of the time: GOES scans every few minutes and a polar
-// satellite passes a few times a day.
-const PLAY_TRAIL_MIN = 60;
+// detected in the trailing 12 hours, older detections fading. A detection is a
+// snapshot, and a fire stays on the map only while a satellite keeps seeing it:
+// GOES scans every 5 minutes but can miss a burning fire for hours (the Oilton
+// fire of 14 March 2025 went undetected from 7:30 PM to 2 AM under an active
+// warning), and each VIIRS satellite passes only about twice a day. Twelve
+// hours bridges the gap between VIIRS passes.
+const PLAY_TRAIL_MIN = 720;
 const PLAY_FRAME_MS = 80;
 const OK_BOUNDS = [[-103.0, 33.6], [-94.4, 37.0]];
 
@@ -488,11 +491,12 @@ function pointPaint(P) {
       : ["match", ["get", "g"], 0, P.sensor[0], 1, P.sensor[1], P.sensor[2]],
     "circle-radius": ["interpolate", ["exponential", 1.5], ["zoom"], 5, radius(1), 9, radius(2), 13, radius(4)],
     // `a` is a detection's age within the playback window, 0 to 1; outside
-    // playback it is absent and nothing fades.
+    // playback it is absent and nothing fades. A 12-hour-old detection keeps
+    // 40% of its opacity, so a fire not seen since morning is still visible.
     "circle-opacity": [
       "*",
       ["match", ["get", "c"], NOT_MEASURED, 0.8, 0.95],
-      ["-", 1, ["*", 0.8, ["coalesce", ["get", "a"], 0]]],
+      ["-", 1, ["*", 0.6, ["coalesce", ["get", "a"], 0]]],
     ],
     "circle-stroke-color": P.ring,
     "circle-stroke-width": ["interpolate", ["linear"], ["zoom"], 5, 0.3, 10, 1],
@@ -1341,7 +1345,7 @@ function playClock() {
   const clock = fmtLocal(state.playMinute * 60000, {
     weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short",
   });
-  return `${clock} · ${nf.format(play.shown)} in the last hour`;
+  return `${clock} · ${nf.format(play.shown)} in the last 12 hours`;
 }
 
 async function startPlay() {
@@ -1369,7 +1373,7 @@ async function startPlay() {
   setVisibility();
   const note = document.createElement("div");
   note.className = "warn";
-  note.textContent = "Playing: each frame shows detections from the hour before the clock, older ones fading.";
+  note.textContent = "Playing: each frame shows detections from the 12 hours before the clock, older ones fading. A detection that fades out does not mean the fire went out, only that no satellite has seen it since.";
   $("legend").prepend(note);
   frame();
 }
@@ -1387,7 +1391,7 @@ function frame() {
   }, PLAY_FRAME_MS);
 }
 
-// Chunks are sorted by time, so the trailing hour is a binary search on the
+// Chunks are sorted by time, so the trailing window is a binary search on the
 // minute column rather than a scan of the whole period.
 function renderPlayFrame() {
   const t = state.playMinute;
@@ -1762,7 +1766,7 @@ function savePng() {
     ctx.font = `${13.5 * dpr}px ${getComputedStyle(document.body).fontFamily}`;
     const view = { points: "detections", heat: "density", counties: "detections per 100 sq mi" }[effectiveView()];
     const subtitle = state.playing
-      ? `${playClock()} · map shows detections in the hour before`
+      ? `${playClock()} · map shows detections in the 12 hours before`
       : `${fmtRange(a, b)} · ${nf.format(current.total)} satellite detections · map shows ${view}`;
     ctx.fillText(subtitle, 16 * dpr, 50 * dpr);
     ctx.font = `${11 * dpr}px ${getComputedStyle(document.body).fontFamily}`;
