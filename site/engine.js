@@ -78,6 +78,10 @@ const SENSOR_GROUPS = [
   { label: "MODIS, AVHRR and analyst-added", families: ["modis", "avhrr", "analyst"] },
 ];
 
+// Pixels each alert outline is nudged off the line it is drawn on, so a
+// warning and a WEA sharing a polygon stay separately visible.
+const WARN_OFFSET = 1.5;
+
 const CARTO = "https://basemaps.cartocdn.com/gl/";
 const BASEMAPS = {
   dark: { label: "Dark", tone: "dark", style: CARTO + "dark-matter-gl-style/style.json" },
@@ -453,13 +457,21 @@ function addOverlays() {
     id: "okf-warn-fill", type: "fill", source: "okf-warnings",
     paint: { "fill-color": P.warn, "fill-opacity": 0.14 },
   }, before);
+  // A sender often sends a WEA for the exact polygon of the warning it
+  // accompanies - 28 of 119 overlapping pairs. Drawn on the same line the aqua
+  // would hide the violet entirely, so the two are nudged a pixel and a half
+  // apart, the warning outward and the WEA inward, and identical areas read as
+  // a double ring.
   map.addLayer({
     id: "okf-warn-line", type: "line", source: "okf-warnings",
-    paint: { "line-color": P.warn, "line-width": 2.2 },
+    paint: { "line-color": P.warn, "line-width": 2.2, "line-offset": WARN_OFFSET },
   }, before);
   map.addLayer({
     id: "okf-warn-county", type: "line", source: "okf-warnings",
-    paint: { "line-color": P.warn, "line-width": 2, "line-dasharray": [2, 1.5] },
+    paint: {
+      "line-color": P.warn, "line-width": 2,
+      "line-dasharray": [2, 1.5], "line-offset": WARN_OFFSET,
+    },
   }, before);
   // WEAs above warnings: their polygons are usually smaller, drawn around one
   // town or neighborhood inside the warned area.
@@ -469,11 +481,14 @@ function addOverlays() {
   }, before);
   map.addLayer({
     id: "okf-wea-line", type: "line", source: "okf-weas",
-    paint: { "line-color": P.wea, "line-width": 2.2 },
+    paint: { "line-color": P.wea, "line-width": 2.2, "line-offset": -WARN_OFFSET },
   }, before);
   map.addLayer({
     id: "okf-wea-county", type: "line", source: "okf-weas",
-    paint: { "line-color": P.wea, "line-width": 2, "line-dasharray": [2, 1.5] },
+    paint: {
+      "line-color": P.wea, "line-width": 2,
+      "line-dasharray": [2, 1.5], "line-offset": -WARN_OFFSET,
+    },
   }, before);
   map.addLayer({
     id: "okf-points", type: "circle", source: "okf-points",

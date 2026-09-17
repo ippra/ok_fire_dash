@@ -227,6 +227,11 @@ darkest on light ones. Sensor colors use three categorical slots, the most
 that stay distinguishable on a map, so MODIS, AVHRR and analyst-added points
 share the third.
 
+A sender often sends a WEA for the exact polygon of the warning it accompanies
+- 28 of the 119 overlapping pairs - so the two outlines are nudged 1.5 pixels
+apart, the warning outward and the WEA inward, and an identical area reads as a
+double ring rather than hiding the violet under the aqua.
+
 WEAs are outlined in aqua (teal on light maps), at least 17 from the violet
 and 8 from every intensity step under simulated color-vision deficiency.
 Fire warnings are outlined in violet, the categorical slot farthest from every
