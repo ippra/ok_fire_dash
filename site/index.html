@@ -112,7 +112,9 @@ window.addEventListener("load", function () { setTimeout(function () {
         <button type="button" class="btn icon" id="step-fwd" title="Later period (→)" aria-label="Later period">&#9654;</button>
       </div>
       <div class="play-row">
-        <button type="button" class="btn" id="play" aria-pressed="false"><span class="play-glyph" aria-hidden="true">&#9654;</span> <span class="play-text">Play minute by minute</span></button>
+        <button type="button" class="btn icon" id="clock-back" title="Back a step" aria-label="Clock back one step">&#9664;</button>
+        <button type="button" class="btn play" id="play" aria-pressed="false"><span class="play-glyph" aria-hidden="true">&#9654;</span> <span class="play-text">Play</span></button>
+        <button type="button" class="btn icon" id="clock-fwd" title="Forward a step" aria-label="Clock forward one step">&#9654;</button>
         <label class="inline">Step
           <select id="play-step">
             <option value="1" selected>1 minute</option>
@@ -121,6 +123,13 @@ window.addEventListener("load", function () { setTimeout(function () {
             <option value="60">1 hour</option>
           </select>
         </label>
+      </div>
+      <div class="clock-row" id="clock-row" hidden>
+        <span class="clock-label" id="clock-label" aria-live="polite"></span>
+        <div class="clock-links">
+          <button type="button" class="link-btn" id="clock-first">First detection</button>
+          <button type="button" class="link-btn" id="clock-exit">Whole period</button>
+        </div>
       </div>
     </section>
 

@@ -17,12 +17,15 @@ loads only the dates you ask for, so a first visit downloads about 2 MB.
   detections across the whole archive that you drag to select. The arrow
   buttons and arrow keys move the range by its own length, so a single day
   steps a day and a week steps a week.
-- **Play minute by minute** through the selected range: a clock in Central
-  Time advances 1, 5 or 15 minutes or an hour per frame, and the map shows the
-  detections from the 12 hours before it, older ones fading. Twelve hours,
-  because a detection is a snapshot: GOES scans every 5 minutes but can miss a
-  burning fire for hours, and each VIIRS satellite passes about twice a day.
-  A detection fading out does not mean the fire went out.
+- **Play, or step minute by minute.** A clock in Central Time runs through the
+  selected dates, and the map shows the detections from the 12 hours before it,
+  older ones fading. Play runs it; the arrows either side of Play move it one
+  step per click, 1, 5 or 15 minutes or an hour, and so do the arrow keys;
+  Pause stops on the frame showing. The clock opens at the **first detection**
+  in the period rather than at midnight, and a link returns it there. Twelve
+  hours, because a detection is a snapshot: GOES scans every 5 minutes but can
+  miss a burning fire for hours, and each VIIRS satellite passes about twice a
+  day. A detection fading out does not mean the fire went out.
 - **Three views.** Individual detections, colored by fire intensity or by
   sensor; a heat map of density; and counties shaded by detections per 100
   square miles.

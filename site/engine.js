@@ -137,7 +137,10 @@ const state = {
   families: null, // Set of family ids switched on
   zoom: "year",
   playing: false,
-  playMinute: null, // minutes since 1970 UTC while playing
+  // The playback clock, in minutes since 1970 UTC. Set means the map shows the
+  // trailing window ending there rather than the whole period, whether the
+  // clock is running or stepped by hand.
+  clock: null,
   showWarnings: true,
   showWeas: true,
 };
@@ -415,7 +418,7 @@ map.addControl(new maplibregl.ScaleControl({ unit: "imperial" }), "bottom-right"
 const tone = () => BASEMAPS[state.basemap].tone;
 
 function effectiveView() {
-  if (state.playing) return "points";
+  if (state.clock != null) return "points";
   if (state.view === "points" && current && current.total > POINT_CAP) return "heat";
   return state.view;
 }
@@ -515,8 +518,8 @@ const WEA_LAYERS = ["okf-wea-fill", "okf-wea-line", "okf-wea-county"];
 // dates, or at the clock during playback.
 function applyWarningFilter() {
   if (!styleReady) return;
-  const when = state.playing
-    ? ["all", ["<=", ["get", "t0"], state.playMinute], [">=", ["get", "t1"], state.playMinute]]
+  const when = state.clock != null
+    ? ["all", ["<=", ["get", "t0"], state.clock], [">=", ["get", "t1"], state.clock]]
     : ["all", ["<=", ["get", "d0"], state.end], [">=", ["get", "d1"], state.start]];
   const layers = [["okf-warn", WARNING_LAYERS, state.showWarnings], ["okf-wea", WEA_LAYERS, state.showWeas]];
   for (const [prefix, ids, on] of layers) {
@@ -1110,8 +1113,8 @@ function drawTimeline() {
   if (state.showWeas) alertTicks(weaGeo, C.wea, 6);
 
   // Play head
-  if (state.playing) {
-    const dayFloat = state.start + (state.playMinute - play.startMinute) / 1440;
+  if (state.clock != null) {
+    const dayFloat = state.start + (state.clock - play.startMinute) / 1440;
     ctx.fillStyle = C.text;
     ctx.fillRect(x(dayFloat) - 1, T - 2, 2, ph + 4);
   }
@@ -1170,7 +1173,7 @@ function dayAtX(px) {
 
 tl.canvas.addEventListener("pointerdown", (e) => {
   if (!tl.layout) return;
-  stopPlay();
+  closeClock();
   const px = e.offsetX;
   const { x } = tl.layout;
   const edgeA = x(state.start), edgeB = x(state.end + 1);
@@ -1271,7 +1274,7 @@ function buildControls() {
     b.type = "button";
     b.textContent = p.label;
     b.dataset.preset = p.id;
-    b.addEventListener("click", () => { stopPlay(); applyPreset(p.id); if (state.zoom === "fit") state.zoom = "year"; update(); });
+    b.addEventListener("click", () => { closeClock(); applyPreset(p.id); if (state.zoom === "fit") state.zoom = "year"; update(); });
     presets.appendChild(b);
   }
   const ys = document.createElement("select");
@@ -1282,7 +1285,7 @@ function buildControls() {
   for (let yr = last; yr >= first; yr--) ys.add(new Option(String(yr), "y" + yr));
   ys.addEventListener("change", () => {
     if (!ys.value) return;
-    stopPlay();
+    closeClock();
     applyPreset(ys.value);
     update();
   });
@@ -1291,7 +1294,7 @@ function buildControls() {
   const ds = $("date-start"), de = $("date-end");
   const onDate = () => {
     if (!ds.value || !de.value) return;
-    stopPlay();
+    closeClock();
     const a = clampDay(isoToDay(ds.value)), b = clampDay(isoToDay(de.value));
     [state.start, state.end] = [Math.min(a, b), Math.max(a, b)];
     state.preset = null;
@@ -1302,7 +1305,12 @@ function buildControls() {
 
   $("step-back").addEventListener("click", () => step(-1));
   $("step-fwd").addEventListener("click", () => step(1));
-  $("play").addEventListener("click", () => (state.playing ? stopPlay(true) : startPlay()));
+  $("play").addEventListener("click", () => (state.playing ? pausePlay() : startPlay()));
+  $("clock-back").addEventListener("click", () => stepClock(-1));
+  $("clock-fwd").addEventListener("click", () => stepClock(1));
+  $("clock-first").addEventListener("click", jumpToFirstDetection);
+  $("clock-exit").addEventListener("click", closeClock);
+  $("play-step").addEventListener("change", () => { if (state.clock != null) syncControls(); });
 
   for (const b of $("view-seg").children) {
     b.addEventListener("click", () => { state.view = b.dataset.view; clearHover(); update(); });
@@ -1369,11 +1377,16 @@ function buildControls() {
   $("download-csv").addEventListener("click", downloadCsv);
 
   document.addEventListener("keydown", (e) => {
-    if (e.target.closest("input, select, textarea, canvas")) return;
+    // The target is the document itself when nothing has focus.
+    const el = e.target instanceof Element ? e.target : null;
+    if (el && el.closest("input, select, textarea, canvas")) return;
     if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
-      if (e.target.closest(".maplibregl-canvas-container")) return;
+      if (el && el.closest(".maplibregl-canvas-container")) return;
       e.preventDefault();
-      step(e.key === "ArrowLeft" ? -1 : 1);
+      const dir = e.key === "ArrowLeft" ? -1 : 1;
+      // While the clock is open the arrows step it; otherwise they move the
+      // dates, which is what they did before there was a clock.
+      if (state.clock != null) stepClock(dir); else step(dir);
     }
   });
 }
@@ -1381,7 +1394,7 @@ function buildControls() {
 // Moves the range by its own length, or by `by` days when given - so a single
 // day steps a day, and a week steps a week.
 function step(dir, by = null) {
-  stopPlay();
+  closeClock();
   const len = state.end - state.start + 1;
   const shift = (by || len) * dir;
   const latest = manifest.latest_day;
@@ -1401,15 +1414,27 @@ function syncDateControls() {
   ds.value = iso(state.start);
   de.value = iso(state.end);
   const len = state.end - state.start + 1;
-  $("range-label").textContent = state.playing
-    ? playClock()
-    : `${fmtRange(state.start, state.end)} · ${nf.format(len)} day${len === 1 ? "" : "s"}`;
+  $("range-label").textContent =
+    `${fmtRange(state.start, state.end)} · ${nf.format(len)} day${len === 1 ? "" : "s"}`;
   $("step-back").disabled = state.start === 0;
   $("step-fwd").disabled = state.end === manifest.latest_day;
 }
 
 function syncControls() {
   syncDateControls();
+  const running = state.playing;
+  $("play").setAttribute("aria-pressed", String(running));
+  $("play").querySelector(".play-glyph").textContent = running ? "\u275A\u275A" : "\u25B6";
+  $("play").querySelector(".play-text").textContent = running ? "Pause" : "Play";
+  $("clock-row").hidden = state.clock == null;
+  if (state.clock != null) {
+    $("clock-label").textContent = playClock();
+    const step = { 1: "a minute", 5: "5 minutes", 15: "15 minutes", 60: "an hour" }[stepMinutes()];
+    $("clock-back").title = `Back ${step}`;
+    $("clock-fwd").title = `Forward ${step}`;
+    $("clock-back").disabled = state.clock <= play.startMinute;
+    $("clock-fwd").disabled = state.clock >= play.endMinute;
+  }
   for (const b of $("presets").querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.preset === state.preset));
   const ys = $("year-select");
   if (ys) ys.value = /^y\d{4}$/.test(state.preset || "") ? state.preset : "";
@@ -1426,6 +1451,10 @@ function syncControls() {
 }
 
 // Play -------------------------------------------------------------------------
+// The clock can be run by the timer or stepped by hand, a step to a click. It
+// starts at the first detection in the period rather than at midnight, because
+// a fire day usually begins in the afternoon and nobody wants to sit through
+// the empty hours.
 let playTimer = null;
 const play = { loaded: [], startMinute: 0, endMinute: 0, shown: 0 };
 
@@ -1443,59 +1472,127 @@ function localMidnightMinute(d) {
 }
 
 function playClock() {
-  const clock = fmtLocal(state.playMinute * 60000, {
+  const clock = fmtLocal(state.clock * 60000, {
     weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short",
   });
   return `${clock} · ${nf.format(play.shown)} in the last 12 hours`;
 }
 
-async function startPlay() {
-  state.playing = true;
-  $("play").setAttribute("aria-pressed", "true");
-  $("play").querySelector(".play-glyph").textContent = "\u25A0";
-  $("play").querySelector(".play-text").textContent = "Stop";
+const stepMinutes = () => Number($("play-step").value);
+
+// The first detection the current filters keep, or null when the period has
+// none. `current` is already the selection for these dates and filters.
+function firstDetectionMinute() {
+  let first = null;
+  for (let j = 0; j < current.total; j++) {
+    const m = current.loaded[current.rowK[j]].minute[current.rowI[j]];
+    if (first === null || m < first) first = m;
+  }
+  return first;
+}
+
+// Loads the period's chunks and settles where the clock starts. Returns false
+// when the data could not be loaded.
+async function openClock() {
+  if (state.clock != null) return true;
   $("busy-text").textContent = "the period";
   $("busy").hidden = false;
   try {
     play.loaded = await Promise.all(chunksFor(state.start, state.end).map(loadChunk));
   } catch (e) {
     $("busy").hidden = true;
-    stopPlay(true);
     toast("Could not load detections: " + e.message, 8000);
-    return;
+    return false;
   }
   $("busy").hidden = true;
-  if (!state.playing) return;
   play.startMinute = localMidnightMinute(state.start);
   play.endMinute = localMidnightMinute(state.end + 1) - 1;
-  state.playMinute = play.startMinute;
+  state.clock = firstDetectionMinute() ?? play.startMinute;
   popup.remove();
   clearHover();
   setVisibility();
-  const note = document.createElement("div");
-  note.className = "warn";
-  note.textContent = "Playing: each frame shows detections from the 12 hours before the clock, older ones fading. A detection that fades out does not mean the fire went out, only that no satellite has seen it since.";
-  $("legend").prepend(note);
+  return true;
+}
+
+function closeClock() {
+  pausePlay();
+  state.clock = null;
+  play.loaded = [];
+  update();
+}
+
+// One step of the clock, a click at a time. Stepping past either end of the
+// period stops there rather than wrapping into dates the reader did not choose.
+async function stepClock(dir) {
+  pausePlay();
+  if (!(await openClock())) return;
+  const next = state.clock + dir * stepMinutes();
+  state.clock = Math.max(play.startMinute, Math.min(play.endMinute, next));
+  drawClock();
+}
+
+async function jumpToFirstDetection() {
+  pausePlay();
+  if (!(await openClock())) return;
+  const first = firstDetectionMinute();
+  if (first === null) {
+    toast("No detections in this period");
+    return;
+  }
+  state.clock = first;
+  drawClock();
+}
+
+function drawClock() {
+  renderPlayFrame();
+  syncControls();
+  drawTimeline();
+}
+
+async function startPlay() {
+  if (!(await openClock())) return;
+  // Play again after the clock has run out starts the period over.
+  if (state.clock >= play.endMinute) {
+    state.clock = firstDetectionMinute() ?? play.startMinute;
+  }
+  state.playing = true;
+  syncControls();
+  legendPlayNote();
   frame();
 }
 
 function frame() {
   if (!state.playing) return;
-  renderPlayFrame();
-  syncDateControls();
-  drawTimeline();
+  drawClock();
   playTimer = setTimeout(() => {
     if (!state.playing) return;
-    if (state.playMinute >= play.endMinute) { stopPlay(true); return; }
-    state.playMinute = Math.min(play.endMinute, state.playMinute + Number($("play-step").value));
+    if (state.clock >= play.endMinute) { pausePlay(); syncControls(); return; }
+    state.clock = Math.min(play.endMinute, state.clock + stepMinutes());
     frame();
   }, PLAY_FRAME_MS);
+}
+
+// Pauses on the frame showing, so a reader can stop on the minute a fire
+// started and step through it.
+function pausePlay() {
+  if (!state.playing) return;
+  state.playing = false;
+  clearTimeout(playTimer);
+  syncControls();
+}
+
+function legendPlayNote() {
+  if ($("legend").querySelector(".warn")) return;
+  const note = document.createElement("div");
+  note.className = "warn";
+  note.textContent = "Each frame shows detections from the 12 hours before the clock, older ones fading. A detection that fades out does not mean the fire went out, only that no satellite has seen it since.";
+  $("legend").prepend(note);
 }
 
 // Chunks are sorted by time, so the trailing window is a binary search on the
 // minute column rather than a scan of the whole period.
 function renderPlayFrame() {
-  const t = state.playMinute;
+  const t = state.clock;
   const from = t - PLAY_TRAIL_MIN + 1;
   const famOn = famIds.map((f) => state.families.has(f));
   const features = [];
@@ -1514,17 +1611,6 @@ function renderPlayFrame() {
   play.shown = features.length;
   if (styleReady) map.getSource("okf-points").setData({ type: "FeatureCollection", features });
   applyWarningFilter();
-}
-
-function stopPlay(redraw = false) {
-  if (!state.playing) return;
-  state.playing = false;
-  clearTimeout(playTimer);
-  play.loaded = [];
-  $("play").setAttribute("aria-pressed", "false");
-  $("play").querySelector(".play-glyph").textContent = "\u25B6";
-  $("play").querySelector(".play-text").textContent = "Play minute by minute";
-  if (redraw) update();
 }
 
 // Panel ------------------------------------------------------------------------
@@ -1558,7 +1644,7 @@ function renderTiles() {
   if (peak >= 0 && days > 1) {
     tile(box, fmtDay(peak, { year: dayDate(sel.a).getUTCFullYear() === dayDate(sel.b).getUTCFullYear() ? undefined : "numeric" }),
       "Busiest day", `${nf.format(peakN)} detections · show this day`,
-      () => { stopPlay(); [state.start, state.end] = [peak, peak]; state.preset = null; update(); });
+      () => { closeClock(); [state.start, state.end] = [peak, peak]; state.preset = null; update(); });
   } else {
     tile(box, days === 1 ? fmtDay(sel.a, { year: undefined }) : "None", days === 1 ? "Day shown" : "Busiest day", null);
   }
@@ -1917,7 +2003,7 @@ function savePng() {
     ctx.fillStyle = sub;
     ctx.font = `${13.5 * dpr}px ${getComputedStyle(document.body).fontFamily}`;
     const view = { points: "detections", heat: "density", counties: "detections per 100 sq mi" }[effectiveView()];
-    const subtitle = state.playing
+    const subtitle = state.clock != null
       ? `${playClock()} · map shows detections in the 12 hours before`
       : `${fmtRange(a, b)} · ${nf.format(current.total)} satellite detections · map shows ${view}`;
     ctx.fillText(subtitle, 16 * dpr, 50 * dpr);
@@ -2003,13 +2089,13 @@ async function checkForUpdate({ quiet = false } = {}) {
     } catch { /* keep the warnings already loaded */ }
     applyManifest(m);
     if (followLatest) applyPreset(state.preset);
-    else if (atLatest && !state.playing) {
+    else if (atLatest && state.clock == null) {
       const len = state.end - state.start;
       [state.start, state.end] = [clampDay(m.latest_day - len), m.latest_day];
     }
     renderAbout();
     if (quiet) { renderFreshness(); return; }
-    if (!state.playing) await update();
+    if (state.clock == null) await update();
     if (newData) toast(`New detections loaded - data through ${fmtLocal(Date.parse(m.data_through), { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`, 5000);
   }
   renderFreshness();
