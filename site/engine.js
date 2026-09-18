@@ -1380,6 +1380,11 @@ function buildControls() {
     // The target is the document itself when nothing has focus.
     const el = e.target instanceof Element ? e.target : null;
     if (el && el.closest("input, select, textarea, canvas")) return;
+    if (e.key === " " && state.clock != null) {
+      e.preventDefault();
+      if (state.playing) pausePlay(); else startPlay();
+      return;
+    }
     if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
       if (el && el.closest(".maplibregl-canvas-container")) return;
       e.preventDefault();
@@ -1456,6 +1461,10 @@ function syncControls() {
 // a fire day usually begins in the afternoon and nobody wants to sit through
 // the empty hours.
 let playTimer = null;
+// Every run of the clock carries a token. A frame belonging to an older run
+// stops, so a second click on Play cannot leave two loops stepping the same
+// clock - which ran it at double speed and made Pause look broken.
+let playRun = 0;
 const play = { loaded: [], startMinute: 0, endMinute: 0, shown: 0 };
 
 // The UTC instant of midnight in Oklahoma on day d. Central Time is five or six
@@ -1550,25 +1559,45 @@ function drawClock() {
 }
 
 async function startPlay() {
-  if (!(await openClock())) return;
+  if (state.playing) return;
+  // Claimed before the await, so a second click while the period loads does
+  // not start a second run.
+  const run = ++playRun;
+  state.playing = true;
+  syncControls();
+  if (!(await openClock()) || run !== playRun) {
+    if (run === playRun) { state.playing = false; syncControls(); }
+    return;
+  }
   // Play again after the clock has run out starts the period over.
   if (state.clock >= play.endMinute) {
     state.clock = firstDetectionMinute() ?? play.startMinute;
   }
-  state.playing = true;
-  syncControls();
   legendPlayNote();
-  frame();
+  frame(run);
 }
 
-function frame() {
-  if (!state.playing) return;
+// The map draws in the background, so a frame waits for it to catch up before
+// the clock moves on. Without this the clock ran ahead of the picture and the
+// map kept painting for a moment after Pause.
+function mapSettled(ms) {
+  return new Promise((resolve) => {
+    const done = () => { clearTimeout(timer); map.off("idle", done); resolve(); };
+    const timer = setTimeout(done, ms);
+    map.once("idle", done);
+  });
+}
+
+async function frame(run) {
+  if (!state.playing || run !== playRun) return;
   drawClock();
+  await mapSettled(PLAY_FRAME_MS * 4);
+  if (!state.playing || run !== playRun) return;
   playTimer = setTimeout(() => {
-    if (!state.playing) return;
-    if (state.clock >= play.endMinute) { pausePlay(); syncControls(); return; }
+    if (!state.playing || run !== playRun) return;
+    if (state.clock >= play.endMinute) { pausePlay(); return; }
     state.clock = Math.min(play.endMinute, state.clock + stepMinutes());
-    frame();
+    frame(run);
   }, PLAY_FRAME_MS);
 }
 
@@ -1577,6 +1606,7 @@ function frame() {
 function pausePlay() {
   if (!state.playing) return;
   state.playing = false;
+  playRun++; // strands any frame already in flight
   clearTimeout(playTimer);
   syncControls();
 }

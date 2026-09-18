@@ -21,7 +21,8 @@ loads only the dates you ask for, so a first visit downloads about 2 MB.
   selected dates, and the map shows the detections from the 12 hours before it,
   older ones fading. Play runs it; the arrows either side of Play move it one
   step per click, 1, 5 or 15 minutes or an hour, and so do the arrow keys;
-  Pause stops on the frame showing. The clock opens at the **first detection**
+  Pause, or the space bar, stops on the frame showing. Each frame waits for
+  the map to finish drawing, so the clock never runs ahead of the picture. The clock opens at the **first detection**
   in the period rather than at midnight, and a link returns it there. Twelve
   hours, because a detection is a snapshot: GOES scans every 5 minutes but can
   miss a burning fire for hours, and each VIIRS satellite passes about twice a
