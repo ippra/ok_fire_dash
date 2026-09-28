@@ -306,6 +306,28 @@ html[data-entry="referred"] .ippra-bar-back { display: inline; }
 .county-list .bar span { display: block; height: 100%; background: var(--bar); border-radius: 2px; }
 .county-list .empty { color: var(--muted); font-size: 13px; padding: 4px 6px; }
 
+h3.sub { margin: 10px 0 2px; font-size: 12px; font-weight: 600; color: var(--muted); }
+h3.sub:first-of-type { margin-top: 0; }
+.history-list { list-style: none; margin: 0; padding: 0; }
+.history-list li button {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 8px;
+  background: none;
+  border: 0;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+}
+.history-list li button:hover { background: var(--hover); }
+.history-list li button[aria-pressed="true"] { background: var(--hover); font-weight: 600; }
+.history-list .n { font-variant-numeric: tabular-nums; color: var(--text-2); }
+.history-list .bar { grid-column: 1 / 3; height: 3px; border-radius: 2px; background: var(--grid); overflow: hidden; }
+.history-list .bar span { display: block; height: 100%; background: var(--bar); border-radius: 2px; }
+.history-list.warn .bar span { background: var(--warn); }
+
 .toggle { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 8px; cursor: pointer; }
 .toggle input { margin: 0; accent-color: var(--warn); }
 .warning-list { list-style: none; margin: 0; padding: 0; }

@@ -395,6 +395,7 @@ async function update(retried = false) {
   renderTiles();
   renderFamilies();
   renderCounties();
+  renderHistory();
   renderWarnings();
   renderWeas();
   renderLegend();
@@ -1291,17 +1292,32 @@ function buildControls() {
   });
   presets.appendChild(ys);
 
+  // A date field fires "change" on every keystroke that leaves it holding a
+  // valid date, and typing a year digit by digit passes through 0002, 0020 and
+  // 0201. Clamping those snapped the field back to the first day of the
+  // archive mid-typing, so a date outside the archive is left alone until the
+  // field loses focus, and only then put back.
   const ds = $("date-start"), de = $("date-end");
-  const onDate = () => {
-    if (!ds.value || !de.value) return;
+  const inArchive = (v) => {
+    const d = v ? isoToDay(v) : NaN;
+    return Number.isFinite(d) && d >= 0 && d <= manifest.latest_day;
+  };
+  const onDate = (e) => {
+    if (!inArchive(ds.value) || !inArchive(de.value)) return;
+    let a = isoToDay(ds.value), b = isoToDay(de.value);
+    // A field moved past the other drags the other with it, rather than
+    // swapping the two under the cursor.
+    if (a > b) { if (e.target === ds) b = a; else a = b; }
+    if (a === state.start && b === state.end) return;
     closeClock();
-    const a = clampDay(isoToDay(ds.value)), b = clampDay(isoToDay(de.value));
-    [state.start, state.end] = [Math.min(a, b), Math.max(a, b)];
+    [state.start, state.end] = [a, b];
     state.preset = null;
     update();
   };
-  ds.addEventListener("change", onDate);
-  de.addEventListener("change", onDate);
+  for (const input of [ds, de]) {
+    input.addEventListener("change", onDate);
+    input.addEventListener("blur", () => { if (!inArchive(input.value)) syncDateControls(); });
+  }
 
   $("step-back").addEventListener("click", () => step(-1));
   $("step-fwd").addEventListener("click", () => step(1));
@@ -1416,8 +1432,10 @@ function syncDateControls() {
   const ds = $("date-start"), de = $("date-end");
   ds.min = de.min = iso(0);
   ds.max = de.max = iso(manifest.latest_day);
-  ds.value = iso(state.start);
-  de.value = iso(state.end);
+  // Rewriting a field that already holds the date resets the cursor of one
+  // being typed in.
+  if (ds.value !== iso(state.start)) ds.value = iso(state.start);
+  if (de.value !== iso(state.end)) de.value = iso(state.end);
   const len = state.end - state.start + 1;
   $("range-label").textContent =
     `${fmtRange(state.start, state.end)} · ${nf.format(len)} day${len === 1 ? "" : "s"}`;
@@ -1791,6 +1809,69 @@ function renderCounties() {
     list.appendChild(li);
   }
   $("county-more").textContent = showAllCounties ? "Show top 10" : `Show all ${manifest.counties.length} counties`;
+}
+
+// The five days in the archive with the most detections, and the five with
+// the most Fire Warnings issued, one click from the map. Detections follow the
+// sensor switches, because the all-sensor ranking is dominated by the years
+// after GOES-16 and NOAA-20 raised counts.
+const HISTORY_N = 5;
+
+function historyRow(list, d, count, max, label) {
+  const li = document.createElement("li");
+  const b = document.createElement("button");
+  b.type = "button";
+  b.setAttribute("aria-pressed", String(state.start === d && state.end === d));
+  b.title = `Show ${fmtDay(d, { weekday: "long", month: "long" })}`;
+  const name = document.createElement("span");
+  name.textContent = fmtDay(d, { weekday: "short" });
+  const n = document.createElement("span");
+  n.className = "n";
+  n.textContent = `${nf.format(count)} ${label}${count === 1 ? "" : "s"}`;
+  const bar = document.createElement("span");
+  bar.className = "bar";
+  const fill = document.createElement("span");
+  fill.style.width = `${(count / max) * 100}%`;
+  bar.appendChild(fill);
+  b.append(name, n, bar);
+  b.addEventListener("click", () => {
+    closeClock();
+    [state.start, state.end] = [d, d];
+    state.preset = null;
+    update();
+  });
+  li.appendChild(b);
+  list.appendChild(li);
+}
+
+function renderHistory() {
+  const byDetections = [];
+  for (let d = 0; d <= manifest.latest_day; d++) {
+    const n = cumulative[d + 1] - cumulative[d];
+    if (n > 0) byDetections.push([d, n]);
+  }
+  byDetections.sort((x, y) => y[1] - x[1] || x[0] - y[0]);
+
+  const perDay = new Map();
+  for (const f of warningGeo.features) {
+    perDay.set(f.properties.d0, (perDay.get(f.properties.d0) || 0) + 1);
+  }
+  const byWarnings = [...perDay].sort((x, y) => y[1] - x[1] || y[0] - x[0]);
+
+  for (const [id, rows, label] of [
+    ["history-detections", byDetections, "detection"],
+    ["history-warnings", byWarnings, "warning"],
+  ]) {
+    const list = $(id);
+    list.textContent = "";
+    const top = rows.slice(0, HISTORY_N);
+    for (const [d, n] of top) historyRow(list, d, n, top[0][1], label);
+  }
+
+  const allOn = state.families.size === famIds.length;
+  $("history-note").textContent = allOn
+    ? "Counts rise with the satellites flying: the top days all fall from 2018 on. Turn on VIIRS only, under Sensors, to rank years more evenly."
+    : "Detections are counted from the sensors switched on.";
 }
 
 function renderWarnings() {
