@@ -244,9 +244,10 @@ every vision type checked). Its one close neighbor is the GOES blue in
 "color by sensor" mode, where the shapes differ: warnings are outlines,
 detections are dots.
 
-The only third-party requests are base map tiles: CARTO for the vector maps
-and labels, Esri for satellite imagery. If they fail, the county and state
-lines and every detection still draw.
+The only third-party requests are base map tiles: CARTO for the vector maps,
+Esri for satellite imagery and the labels over it. CARTO's raster label tiles
+now need an API key, so the satellite map does not use them. If tiles fail,
+the county and state lines and every detection still draw.
 
 ## Automatic updates: GitHub Actions and Pages
 
