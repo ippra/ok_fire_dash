@@ -2256,7 +2256,7 @@ function buildThemeMenu() {
     const b = e.target.closest("button[data-theme]");
     if (!b) return;
     document.documentElement.dataset.theme = b.dataset.theme;
-    try { sessionStorage.setItem("okfrw-theme", b.dataset.theme); } catch { /* private mode */ }
+    try { sessionStorage.setItem("okfire-theme", b.dataset.theme); } catch { /* private mode */ }
     mark();
     toggle(false);
     readColors();
