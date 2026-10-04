@@ -1,10 +1,10 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="okfire">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script>
-// Some static handlers serve /fire without adding the trailing slash, which
+// Some static handlers serve /ok_fire_dash without the trailing slash, which
 // breaks every relative URL in this page. Canonicalize first.
 (function(){var p=location.pathname;
 if(!/\/$/.test(p)&&!/\.html$/.test(p)){location.replace(p+"/"+location.search+location.hash);}})();
@@ -37,6 +37,19 @@ window.addEventListener("load", function () { setTimeout(function () {
     d.join("\n") + "\nbuild " + window.OKF_BUILD + " — " + navigator.userAgent;
   l.classList.add("boot-failed");
 }, 8000); });
+</script>
+<script>
+// Theme precedence: ?theme= deep link, then the viewer's pick for this tab,
+// then the light default. Set here so the page never paints in the wrong one.
+(function () {
+  var ids = ["okfire", "dark", "greyscale"];
+  var pick = null;
+  try {
+    pick = new URLSearchParams(location.search).get("theme") ||
+      sessionStorage.getItem("okfire-theme");
+  } catch (e) { /* private mode */ }
+  if (ids.indexOf(pick) !== -1) document.documentElement.dataset.theme = pick;
+})();
 </script>
 </head>
 <body>
@@ -91,9 +104,28 @@ window.addEventListener("load", function () { setTimeout(function () {
 })();
 </script>
 
+<!-- The masthead the institute's dashboards share (s3ok_dash, errs). The
+     Beta badge ships hidden; 07_build_dashboard.R shows it in the beta build
+     only. -->
+<header id="navbar">
+  <span id="nav-title">
+    <span class="brand-name">OK Fire<span class="brand-beta" hidden>Beta</span></span>
+    <span class="brand-sub">Oklahoma fire detections, warnings &amp; alerts</span>
+  </span>
+  <div id="theme-switch">
+    <button id="theme-btn" type="button" title="Adjust colors" aria-haspopup="true" aria-expanded="false">&#9680; Adjust colors</button>
+    <div id="theme-menu">
+      <button type="button" data-theme="okfire"><span class="swatch" style="background:#443A83"></span>OK Fire</button>
+      <button type="button" data-theme="dark"><span class="swatch" style="background:#0f172a"></span>Dark</button>
+      <button type="button" data-theme="greyscale"><span class="swatch" style="background:#000000"></span>Greyscale (high contrast)</button>
+    </div>
+  </div>
+</header>
+
 <div id="shell">
   <aside id="panel" aria-label="Controls and summary">
     <header class="panel-head">
+      <p class="eyebrow">Fire detections &middot; University of Oklahoma</p>
       <h1>Oklahoma Fire Detections</h1>
       <p class="lede">Satellite fire detections from NOAA&rsquo;s Hazard Mapping System</p>
       <p class="freshness" id="freshness"><span class="live-dot" aria-hidden="true"></span><span id="freshness-text">Loading&hellip;</span></p>

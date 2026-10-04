@@ -1,4 +1,10 @@
-# Refresh from NOAA and publish to GitHub Pages.
+# Refresh from NOAA and publish the beta to GitHub Pages.
+#
+# The beta lives at https://ippra.github.io/ok_fire_dash/ and is built with
+# OKF_CHANNEL=beta: a Beta label in the masthead, a noindex tag and a
+# robots.txt that disallows everything. The production site at
+# ippra.net/ok_fire_dash is not deployed from here; it is built without the
+# channel variable and copied to our own server. See README.md, "Deploying".
 #
 # Runs the whole pipeline every three hours. The raw archives are not in the
 # repo; they live in the Actions cache between runs, so a routine run downloads
@@ -69,6 +75,8 @@ jobs:
           restore-keys: ipaws-archive-
 
       - name: Refresh, build data, assemble site
+        env:
+          OKF_CHANNEL: beta
         run: Rscript 00_run_pipeline.R
 
       # Saved even when a later step fails, so a cold start interrupted by a

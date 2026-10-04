@@ -10,6 +10,9 @@ It replaces `NOAA FIRE DATA/ok_fire_map/fire_map.R`, which baked the whole
 archive into a 280 MB htmlwidget and could show one day at a time. This site
 loads only the dates you ask for, so a first visit downloads about 2 MB.
 
+- **Beta:** https://ippra.github.io/ok_fire_dash/
+- **Release:** https://ippra.net/ok_fire_dash
+
 ## What it does
 
 - **Any date range.** Presets (latest day, 7, 30 and 90 days, year to date,
@@ -22,11 +25,17 @@ loads only the dates you ask for, so a first visit downloads about 2 MB.
   older ones fading. Play runs it; the arrows either side of Play move it one
   step per click, 1, 5 or 15 minutes or an hour, and so do the arrow keys;
   Pause, or the space bar, stops on the frame showing. Each frame waits for
-  the map to finish drawing, so the clock never runs ahead of the picture. The clock opens at the **first detection**
-  in the period rather than at midnight, and a link returns it there. Twelve
-  hours, because a detection is a snapshot: GOES scans every 5 minutes but can
-  miss a burning fire for hours, and each VIIRS satellite passes about twice a
-  day. A detection fading out does not mean the fire went out.
+  the map to finish drawing, so the clock never runs ahead of the picture. The
+  clock opens at the **first detection** in the period rather than at
+  midnight, and a link returns it there. Twelve hours, because a detection is
+  a snapshot: GOES scans every 5 minutes but can miss a burning fire for
+  hours, and each VIIRS satellite passes about twice a day. A detection fading
+  out does not mean the fire went out.
+- **Historic days.** The five days in the archive with the most detections,
+  and the five with the most NWS Fire Warnings issued, each one click from the
+  map. The detection ranking follows the sensor switches, because with every
+  sensor on it is dominated by the years after 2018, when new satellites
+  raised counts.
 - **Three views.** Individual detections, colored by fire intensity or by
   sensor; a heat map of density; and counties shaded by detections per 100
   square miles.
@@ -50,9 +59,12 @@ loads only the dates you ask for, so a first visit downloads about 2 MB.
   copied link reproduces it; links to a preset like "30 days" stay current.
   Save the map as a PNG with a title and credits, or download the selected
   detections as CSV.
-- **Updates itself.** A GitHub Actions workflow refreshes from NOAA every three
-  hours, and an open page checks for new data every 10 minutes and loads it
-  without a reload.
+- **Updates itself.** The beta refreshes from NOAA every three hours, and an
+  open page checks for new data every 10 minutes and loads it without a
+  reload. The release on ippra.net holds the data it was copied with; see
+  Deploying.
+- **Light, dark and greyscale.** "Adjust colors" in the masthead switches the
+  page's theme, as on the institute's other dashboards.
 
 ## The pipeline
 
@@ -108,8 +120,7 @@ lacks, a warning whose UGC line, expiry or polygon does not parse or whose zone
 resolves to no county, an IPAWS download whose pages do not add up to the
 count FEMA promised, a WEA that mentions fire but is neither classed as
 wildfire nor reviewed, and R or CSV files in the published directory all halt
-the build. A
-failed run leaves the last good site in place.
+the build. A failed run leaves the last good site in place.
 
 ## Decisions worth knowing
 
@@ -221,8 +232,11 @@ count series per sensor family behind the timeline, and the build stamps.
 ## The front end
 
 `site/` is hand-edited: `index.html`, `engine.js`, `engine.css`, and MapLibre
-GL JS 6.10.0 vendored under `site/assets/vendor/`. The IPPRA bar is the same
-markup as fusion_dash's.
+GL JS 6.10.0 vendored under `site/assets/vendor/`. The chrome is the
+institute's shared look (`ippra/s3ok_dash`, `ippra/errs`): the IPPRA bar, the
+midnight masthead with its viridis strip, and the light, dark and greyscale
+themes under "Adjust colors". The themes restyle the panel and timeline only;
+the map's data colors follow the base map, because the marks sit on it.
 
 Colors were checked with the dataviz palette validator against each base map's
 own background. Intensity is one orange hue in four steps, ordered so the
@@ -249,58 +263,46 @@ Esri for satellite imagery and the labels over it. CARTO's raster label tiles
 now need an API key, so the satellite map does not use them. If tiles fail,
 the county and state lines and every detection still draw.
 
-## Automatic updates: GitHub Actions and Pages
+## Deploying
 
-`.github/workflows/refresh.yml` runs `00_run_pipeline.R` every three hours
-(and on every push to `main` or by hand from the Actions tab) and publishes
-`outputs/07_site/` to GitHub Pages. No computer needs to be on.
+Two deployments of one build.
 
-The raw archives are not committed. Each lives in its own Actions cache entry
-between runs, so a routine run fetches only the last few days and finishes in
-a few minutes. If a cache is evicted, the next run rebuilds that archive: about
-40 minutes for NOAA detections, about 5 for IPAWS.
+**Beta: GitHub Pages, automatic.** `.github/workflows/refresh.yml` runs the
+whole pipeline every three hours and on every push to `main`, and publishes
+`outputs/07_site/` to https://ippra.github.io/ok_fire_dash/. It sets
+`OKF_CHANNEL=beta`, which puts a Beta label beside the masthead title, adds a
+`noindex` tag and writes a `robots.txt` that disallows everything, so the beta
+is never found in place of production. The repository's Pages source must be
+set to GitHub Actions (Settings, Pages).
 
-A failed run publishes nothing, so the live site keeps its last good build,
-and GitHub emails the repository owner. Usual causes: NOAA's server is down
-(the next run retries), or NOAA used a satellite or method name that is not
-in `reference/` - add the row and push.
+The raw archives live in the Actions cache between runs, so a routine run
+fetches only the last few days. A failed run publishes nothing: the beta keeps
+its last good build and GitHub emails the repository owner. The usual causes
+are NOAA's server being down (the next run retries) or a new satellite or
+method name, which needs a row in `reference/`. GitHub stops the schedule
+after 60 days without a commit; the Actions tab has a button to restart it.
 
-Open pages also update themselves: the page re-reads `data/manifest.json`
-every 10 minutes and loads new detections without a reload.
+**Production: ippra.net, by hand. Matt deploys it.** Unlike the beta, this
+needs R and the pipeline: the raw archives are not in the repository, so the
+first run on a machine downloads them, about 45 minutes; later runs fetch only
+the last few days. From a clone of `main`:
 
-### One-time setup
+```
+Rscript 00_run_pipeline.R
+rsync -av --delete outputs/07_site/ <ippra.net host>:<docroot>/ok_fire_dash/
+```
 
-1. Create an empty **public** repository on GitHub (for example
-   `ippra/ok_fire_dash`). Pages on a private repository needs a paid plan.
-2. Push this directory:
+Leave `OKF_CHANNEL` unset: that is what makes it the production build, with no
+Beta label and no `noindex`. R packages are listed under Building and
+previewing.
 
-   ```sh
-   git add -A
-   git commit -m "Oklahoma fire detections dashboard"
-   git branch -M main
-   git remote add origin https://github.com/<owner>/ok_fire_dash.git
-   git push -u origin main
-   ```
+The site is plain static files with relative URLs, so it runs under any path
+and needs no server-side code. One server setting: serve `index.html` with
+`Cache-Control: no-cache` (as for the dashboards, on the entry URLs
+`/ok_fire_dash`, `/ok_fire_dash/` and `/ok_fire_dash/index.html`), so a new
+deploy is seen without a hard refresh. Everything else carries a build stamp
+or content hash and can be cached as long as the server likes.
 
-3. In the repository, **Settings → Pages → Source: GitHub Actions**.
-4. **Actions → Refresh and publish → Run workflow**, or wait for the push to
-   trigger it. The first run takes about 45 minutes; the site is then at
-   `https://<owner>.github.io/ok_fire_dash/`.
-
-GitHub disables scheduled workflows in a public repository after 60 days
-without a commit. The Actions tab shows a banner with a button to re-enable
-it.
-
-## Hosting elsewhere
-
-`outputs/07_site/` is the whole site: plain static files, no server code, so it
-can also be copied to ippra.net like the other dashboards.
-
-- `index.html` must be served with `Cache-Control: no-cache`. It is the one
-  file that cannot version-stamp itself.
-- `engine.js` and `engine.css` carry a `?v=<build>` stamp, and detection chunks
-  carry a content hash, so both can be cached as long as a host likes.
-- `data/manifest.json` is fetched with `no-store` and a query string.
-
-`07_build_dashboard.R` builds into `outputs/07_site.next` and swaps it in, so a
-host serving `outputs/07_site` never sees a half-copied site mid-refresh.
+Production holds the data it was copied with and does not refresh itself. To
+publish newer data or a newer version, pull `main`, run the pipeline and rsync
+again.

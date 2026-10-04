@@ -2236,10 +2236,41 @@ function renderAbout() {
   p(`Built by the <a href="https://ippra.net">Institute for Public Policy Research and Analysis</a> at the University of Oklahoma.`);
 }
 
+// Themes -----------------------------------------------------------------------
+// The "Adjust colors" menu the institute's dashboards share. index.html sets
+// the theme before paint; this only switches it. The timeline is a canvas, so
+// it is redrawn in the new theme's colors.
+function buildThemeMenu() {
+  const btn = $("theme-btn"), menu = $("theme-menu");
+  const mark = () => {
+    for (const b of menu.querySelectorAll("button")) {
+      b.classList.toggle("active", b.dataset.theme === document.documentElement.dataset.theme);
+    }
+  };
+  const toggle = (open) => {
+    menu.classList.toggle("open", open);
+    btn.setAttribute("aria-expanded", String(menu.classList.contains("open")));
+  };
+  btn.addEventListener("click", () => toggle());
+  menu.addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-theme]");
+    if (!b) return;
+    document.documentElement.dataset.theme = b.dataset.theme;
+    try { sessionStorage.setItem("okfire-theme", b.dataset.theme); } catch { /* private mode */ }
+    mark();
+    toggle(false);
+    readColors();
+    drawTimeline();
+  });
+  document.addEventListener("click", (e) => { if (!e.target.closest("#theme-switch")) toggle(false); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") toggle(false); });
+  mark();
+}
+
 // Boot -------------------------------------------------------------------------
 async function boot() {
   readColors();
-  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { readColors(); drawTimeline(); });
+  buildThemeMenu();
 
   const [m, counties, warnings, weas] = await Promise.all([
     fetchManifest(),
