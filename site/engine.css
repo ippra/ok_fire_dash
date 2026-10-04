@@ -1,6 +1,6 @@
 /* engine.css - Oklahoma Fire Detections.
    Tokens up top, in the palette the institute's dashboards share (s3ok_dash,
-   errs): cool-violet paper and a midnight masthead. They are the okfire
+   errs): cool-violet paper and a midnight masthead. They are the okfrw
    (light, default) theme; dark and greyscale override them on
    html[data-theme], chosen under "Adjust colors". The themes swap the panel
    chrome only. The map's data colors key off the base map's tone instead

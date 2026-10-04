@@ -11,7 +11,7 @@ archive into a 280 MB htmlwidget and could show one day at a time. This site
 loads only the dates you ask for, so a first visit downloads about 2 MB.
 
 - **Beta:** https://ippra.github.io/ok_fire_dash/
-- **Release:** https://ippra.net/okfire
+- **Release:** https://ippra.net/okfrw
 
 ## What it does
 
@@ -289,7 +289,7 @@ the last few days. From a clone of `main`:
 
 ```
 Rscript 00_run_pipeline.R
-rsync -av --delete outputs/07_site/ <ippra.net host>:<docroot>/okfire/
+rsync -av --delete outputs/07_site/ <ippra.net host>:<docroot>/okfrw/
 ```
 
 Leave `OKF_CHANNEL` unset: that is what makes it the production build, with no
@@ -298,16 +298,16 @@ previewing.
 
 The site is plain static files with relative URLs, so it runs under any path
 and needs no server-side code. One server setting: serve `index.html` with
-`Cache-Control: no-cache` (as for the dashboards, on the entry URLs `/okfire`,
-`/okfire/` and `/okfire/index.html`), so a new deploy is seen without a hard
+`Cache-Control: no-cache` (as for the dashboards, on the entry URLs `/okfrw`,
+`/okfrw/` and `/okfrw/index.html`), so a new deploy is seen without a hard
 refresh. Everything else carries a build stamp or content hash and can be
 cached as long as the server likes.
 
-After deploying, open https://ippra.net/okfire and check two things: the map
-loads, and there is no Beta label beside "OK Fire" in the masthead.
+After deploying, open https://ippra.net/okfrw and check two things: the map
+loads, and there is no Beta label beside "OKFRW" in the masthead.
 
-Link to it from ippra.net as `/okfire/?from=<path of the linking page>`, for
-example `/okfire/?from=/tools`. A visitor who arrives that way gets a "Back to
+Link to it from ippra.net as `/okfrw/?from=<path of the linking page>`, for
+example `/okfrw/?from=/tools`. A visitor who arrives that way gets a "Back to
 IPPRA" link in the black bar that returns them to that page; anyone else sees
 the institute's name there.
 

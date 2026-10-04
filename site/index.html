@@ -1,10 +1,10 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="okfire">
+<html lang="en" data-theme="okfrw">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script>
-// Some static handlers serve /okfire without the trailing slash, which
+// Some static handlers serve /okfrw without the trailing slash, which
 // breaks every relative URL in this page. Canonicalize first.
 (function(){var p=location.pathname;
 if(!/\/$/.test(p)&&!/\.html$/.test(p)){location.replace(p+"/"+location.search+location.hash);}})();
@@ -42,11 +42,11 @@ window.addEventListener("load", function () { setTimeout(function () {
 // Theme precedence: ?theme= deep link, then the viewer's pick for this tab,
 // then the light default. Set here so the page never paints in the wrong one.
 (function () {
-  var ids = ["okfire", "dark", "greyscale"];
+  var ids = ["okfrw", "dark", "greyscale"];
   var pick = null;
   try {
     pick = new URLSearchParams(location.search).get("theme") ||
-      sessionStorage.getItem("okfire-theme");
+      sessionStorage.getItem("okfrw-theme");
   } catch (e) { /* private mode */ }
   if (ids.indexOf(pick) !== -1) document.documentElement.dataset.theme = pick;
 })();
@@ -109,13 +109,13 @@ window.addEventListener("load", function () { setTimeout(function () {
      only. -->
 <header id="navbar">
   <span id="nav-title">
-    <span class="brand-name">OK Fire<span class="brand-beta" hidden>Beta</span></span>
-    <span class="brand-sub">Oklahoma fire detections, warnings &amp; alerts</span>
+    <span class="brand-name">OKFRW<span class="brand-beta" hidden>Beta</span></span>
+    <span class="brand-sub">Oklahoma Fire Warning Tracker</span>
   </span>
   <div id="theme-switch">
     <button id="theme-btn" type="button" title="Adjust colors" aria-haspopup="true" aria-expanded="false">&#9680; Adjust colors</button>
     <div id="theme-menu">
-      <button type="button" data-theme="okfire"><span class="swatch" style="background:#443A83"></span>OK Fire</button>
+      <button type="button" data-theme="okfrw"><span class="swatch" style="background:#443A83"></span>OKFRW</button>
       <button type="button" data-theme="dark"><span class="swatch" style="background:#0f172a"></span>Dark</button>
       <button type="button" data-theme="greyscale"><span class="swatch" style="background:#000000"></span>Greyscale (high contrast)</button>
     </div>
