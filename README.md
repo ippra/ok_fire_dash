@@ -1,4 +1,4 @@
-# ok_fire_dash - Oklahoma Fire Detections
+# okfirewarn - OK FireWarn
 
 A static site that maps every satellite fire detection in Oklahoma since
 2015 from NOAA's Hazard Mapping System (HMS), every National Weather Service
@@ -10,7 +10,7 @@ It replaces `NOAA FIRE DATA/ok_fire_map/fire_map.R`, which baked the whole
 archive into a 280 MB htmlwidget and could show one day at a time. This site
 loads only the dates you ask for, so a first visit downloads about 2 MB.
 
-- **Beta:** https://ippra.github.io/ok_fire_dash/
+- **Beta:** https://ippra.github.io/okfirewarn/
 - **Release:** https://ippra.net/okfirewarn
 
 ## What it does
@@ -269,7 +269,7 @@ Two deployments of one build.
 
 **Beta: GitHub Pages, automatic.** `.github/workflows/refresh.yml` runs the
 whole pipeline every three hours and on every push to `main`, and publishes
-`outputs/07_site/` to https://ippra.github.io/ok_fire_dash/. It sets
+`outputs/07_site/` to https://ippra.github.io/okfirewarn/. It sets
 `OKF_CHANNEL=beta`, which puts a Beta label beside the masthead title, adds a
 `noindex` tag and writes a `robots.txt` that disallows everything, so the beta
 is never found in place of production. The repository's Pages source must be

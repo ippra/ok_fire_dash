@@ -1,6 +1,6 @@
 # Refresh from NOAA and publish the beta to GitHub Pages.
 #
-# The beta lives at https://ippra.github.io/ok_fire_dash/ and is built with
+# The beta lives at https://ippra.github.io/okfirewarn/ and is built with
 # OKF_CHANNEL=beta: a Beta label in the masthead, a noindex tag and a
 # robots.txt that disallows everything. The production site at
 # ippra.net/okfirewarn is not deployed from here; it is built without the
