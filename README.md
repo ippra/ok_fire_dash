@@ -303,6 +303,14 @@ and needs no server-side code. One server setting: serve `index.html` with
 deploy is seen without a hard refresh. Everything else carries a build stamp
 or content hash and can be cached as long as the server likes.
 
+After deploying, open https://ippra.net/ok_fire_dash and check two things: the
+map loads, and there is no Beta label beside "OK Fire" in the masthead.
+
+Link to it from ippra.net as `/ok_fire_dash/?from=<path of the linking page>`,
+for example `/ok_fire_dash/?from=/tools`. A visitor who arrives that way gets a
+"Back to IPPRA" link in the black bar that returns them to that page; anyone
+else sees the institute's name there.
+
 Production holds the data it was copied with and does not refresh itself. To
 publish newer data or a newer version, pull `main`, run the pipeline and rsync
 again.
