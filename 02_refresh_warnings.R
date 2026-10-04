@@ -4,12 +4,12 @@ source(here::here("00_paths.R"))
 
 # Refresh Fire Warnings --------------------------------------------------------
 # Pulls every NWS Fire Warning (FRW) from IEM since the day before the archive
-# starts, for every office. 04_build_warnings.R keeps the Oklahoma ones. The
+# starts, for every office. 05_build_warnings.R keeps the Oklahoma ones. The
 # pull replaces data/frw_text/ whole rather than topping it up; see 00_paths.R.
 #
-# fire_warning_archive holds the same products, but its archive is private and
-# refreshed by hand, and this pipeline runs unattended on GitHub, so it fetches
-# its own copy.
+# usfirewarn pulls the same products for its national map. Each pipeline
+# fetches its own copy, about 430 KB, so neither repository needs the other
+# to have been built.
 
 # The PIL is a prefix match, so FRW returns every office. limit caps the
 # number of products; a pull that reaches it would be silently incomplete.
