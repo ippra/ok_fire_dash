@@ -10,8 +10,11 @@ It replaces `NOAA FIRE DATA/ok_fire_map/fire_map.R`, which baked the whole
 archive into a 280 MB htmlwidget and could show one day at a time. This site
 loads only the dates you ask for, so a first visit downloads about 2 MB.
 
-- **Beta:** https://ippra.github.io/okfirewarn/
-- **Release:** https://ippra.net/okfirewarn
+- **Site:** https://ippra.github.io/okfirewarn/
+
+It is an IPPRA Labs project: a working tool built on data other agencies
+publish, rather than one of the institute's own data products. Labs projects
+are hosted on GitHub Pages and are not released to ippra.net.
 
 ## What it does
 
@@ -59,10 +62,9 @@ loads only the dates you ask for, so a first visit downloads about 2 MB.
   copied link reproduces it; links to a preset like "30 days" stay current.
   Save the map as a PNG with a title and credits, or download the selected
   detections as CSV.
-- **Updates itself.** The beta refreshes from NOAA every three hours, and an
+- **Updates itself.** The site refreshes from NOAA every three hours, and an
   open page checks for new data every 10 minutes and loads it without a
-  reload. The release on ippra.net holds the data it was copied with; see
-  Deploying.
+  reload.
 - **Light, dark and greyscale.** "Adjust colors" in the masthead switches the
   page's theme, as on the institute's other dashboards.
 
@@ -265,52 +267,28 @@ the county and state lines and every detection still draw.
 
 ## Deploying
 
-Two deployments of one build.
+One deployment: GitHub Pages, automatic. As an IPPRA Labs project the site is
+not copied to ippra.net.
 
-**Beta: GitHub Pages, automatic.** `.github/workflows/refresh.yml` runs the
-whole pipeline every three hours and on every push to `main`, and publishes
-`outputs/07_site/` to https://ippra.github.io/okfirewarn/. It sets
-`OKF_CHANNEL=beta`, which puts a Beta label beside the masthead title, adds a
-`noindex` tag and writes a `robots.txt` that disallows everything, so the beta
-is never found in place of production. The repository's Pages source must be
-set to GitHub Actions (Settings, Pages).
+`.github/workflows/refresh.yml` runs the whole pipeline every three hours and
+on every push to `main`, and publishes `outputs/07_site/` to
+https://ippra.github.io/okfirewarn/. The repository's Pages source must be set
+to GitHub Actions (Settings, Pages).
 
 The raw archives live in the Actions cache between runs, so a routine run
-fetches only the last few days. A failed run publishes nothing: the beta keeps
+fetches only the last few days. A failed run publishes nothing: the site keeps
 its last good build and GitHub emails the repository owner. The usual causes
 are NOAA's server being down (the next run retries) or a new satellite or
 method name, which needs a row in `reference/`. GitHub stops the schedule
 after 60 days without a commit; the Actions tab has a button to restart it.
 
-**Production: ippra.net, by hand. Matt deploys it.** Unlike the beta, this
-needs R and the pipeline: the raw archives are not in the repository, so the
-first run on a machine downloads them, about 45 minutes; later runs fetch only
-the last few days. From a clone of `main`:
-
-```
-Rscript 00_run_pipeline.R
-rsync -av --delete outputs/07_site/ <ippra.net host>:<docroot>/okfirewarn/
-```
-
-Leave `OKF_CHANNEL` unset: that is what makes it the production build, with no
-Beta label and no `noindex`. R packages are listed under Building and
-previewing.
+The masthead carries a Labs badge on every build, and the site is open to
+search engines.
 
 The site is plain static files with relative URLs, so it runs under any path
-and needs no server-side code. One server setting: serve `index.html` with
-`Cache-Control: no-cache` (as for the dashboards, on the entry URLs
-`/okfirewarn`, `/okfirewarn/` and `/okfirewarn/index.html`), so a new deploy is
-seen without a hard refresh. Everything else carries a build stamp or content
-hash and can be cached as long as the server likes.
-
-After deploying, open https://ippra.net/okfirewarn and check two things: the
-map loads, and there is no Beta label beside "OK FireWarn" in the masthead.
-
-Link to it from ippra.net as `/okfirewarn/?from=<path of the linking page>`,
-for example `/okfirewarn/?from=/tools`. A visitor who arrives that way gets a
-"Back to IPPRA" link in the black bar that returns them to that page; anyone
-else sees the institute's name there.
-
-Production holds the data it was copied with and does not refresh itself. To
-publish newer data or a newer version, pull `main`, run the pipeline and rsync
-again.
+and needs no server-side code. Should it ever move to another host: serve
+`index.html` with `Cache-Control: no-cache`, so a new build is seen without a
+hard refresh. Everything else carries a build stamp or content hash and can be
+cached as long as the server likes. Building it elsewhere needs R and the
+pipeline; the raw archives are not in the repository, so the first run on a
+machine downloads them, about 45 minutes.

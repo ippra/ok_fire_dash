@@ -11,16 +11,6 @@ source(here::here("00_paths.R"))
 # Writes outputs/07_site/ - plain static files, no server code. Preview:
 #   python3 preview.py
 
-# Which deployment this build is for. The beta on GitHub Pages is built with
-# OKF_CHANNEL=beta, which labels the masthead and asks search engines not to
-# index it, so the beta never competes with the production site in search.
-# Unset, the build is production: the same site with neither.
-channel <- Sys.getenv("OKF_CHANNEL", "production")
-
-if (!channel %in% c("production", "beta")) {
-  stop("OKF_CHANNEL is `", channel, "`; use `beta` or leave it unset.")
-}
-
 data_in <- file.path(outputs, "04_map_data")
 warnings_in <- file.path(outputs, "05_warnings")
 weas_in <- file.path(outputs, "06_weas")
@@ -88,29 +78,6 @@ for (file in c("index.html", "engine.js", "engine.css")) {
     write_file(path)
 }
 
-# The Beta badge ships hidden, so a production build needs no edit to drop it.
-if (channel == "beta") {
-  index_path <- file.path(staging, "index.html")
-  index_html <- read_file(index_path)
-  badge <- "<span class=\"brand-beta\" hidden>"
-  viewport <- "<meta name=\"viewport\""
-  noindex <- "<meta name=\"robots\" content=\"noindex, nofollow\">\n"
-
-  if (str_count(index_html, fixed(badge)) != 1) {
-    stop("index.html has no single hidden Beta badge.")
-  }
-  if (str_count(index_html, fixed(viewport)) != 1) {
-    stop("index.html has no single viewport line.")
-  }
-
-  index_html |>
-    str_replace(fixed(badge), "<span class=\"brand-beta\">") |>
-    str_replace(fixed(viewport), paste0(noindex, viewport)) |>
-    write_file(index_path)
-  robots <- c("User-agent: *", "Disallow: /")
-  write_lines(robots, file.path(staging, "robots.txt"))
-}
-
 # Guards -----------------------------------------------------------------------
 published <- list.files(staging, recursive = TRUE, all.files = TRUE)
 
@@ -132,6 +99,6 @@ invisible(file.rename(staging, out))
 
 site_mb <- sum(file.size(file.path(out, published))) / 1e6
 message(
-  "Site (", channel, "): ", length(published), " files, ",
+  "Site: ", length(published), " files, ",
   round(site_mb, 1), " MB, build ", build
 )
